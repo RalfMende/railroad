@@ -1078,7 +1078,7 @@ int main(int argc, char **argv) {
 	    } else if (ret) {
 		// printf("Client %s ", inet_ntoa(src_addr.sin_addr));
 		z21_data.ip = src_addr.sin_addr.s_addr;
-		add_z21c_ip(z21_data.ip, z21_data.foreground);
+		add_z21c_ip(z21_data.ip, src_addr.sin_port, z21_data.foreground);
 		check_data_xpn(&z21_data, ret, z21_data.foreground);
 	    }
 	}
@@ -1092,7 +1092,7 @@ int main(int argc, char **argv) {
 		break;
 	    } else {
 		z21_data.ip = src_addr.sin_addr.s_addr;
-		add_z21c_ip(z21_data.ip, z21_data.foreground);
+		add_z21c_ip(z21_data.ip, src_addr.sin_port, z21_data.foreground);
 		check_data_xpn(&z21_data, ret, z21_data.foreground);
 	    }
 	}

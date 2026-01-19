@@ -23,7 +23,7 @@
 struct subscriber_t *subscriber = NULL;
 pthread_mutex_t lock=PTHREAD_MUTEX_INITIALIZER;
 
-int add_z21c_ip(uint32_t ip, int verbose) {
+int add_z21c_ip(uint32_t ip, uint16_t port, int verbose) {
     struct subscriber_t *sub;
 
     pthread_mutex_lock(&lock);
@@ -41,8 +41,7 @@ int add_z21c_ip(uint32_t ip, int verbose) {
 	sub->broadcast_flags = DEFAULT_BROADCAST_FLAGS;
 	sub->client_addr.sin_family = AF_INET;
 	sub->client_addr.sin_addr.s_addr = ip;
-	/* TODO */
-	sub->client_addr.sin_port = htons(21105);
+	sub->client_addr.sin_port = port;
 	sub->client_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
 	if (sub->client_socket < 0) {
 	    fprintf(stderr, "primary sending UDP socket error: %s\n", strerror(errno));
