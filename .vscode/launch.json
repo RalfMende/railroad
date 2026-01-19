@@ -7,7 +7,7 @@
       "request": "launch",
       "program": "${workspaceFolder}/z21/src/z21emu",
       "args": ["-g", "192.168.20.79", "-c", "/www/config/config", "-f", "-x"],
-      "stopAtEntry": true,
+      "stopAtEntry": false,
       "cwd": "${workspaceFolder}/z21/src",
       "environment": [],
       "externalConsole": false,
