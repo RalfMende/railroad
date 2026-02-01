@@ -26,7 +26,7 @@
       "type": "cppdbg",
       "request": "launch",
       "program": "${workspaceFolder}/z21/src/cs2toz21",
-      "args": ["-v", "-c", "/www/config"],
+      "args": ["-c", "/www/config", "-f", "1000", "-v"],
       "stopAtEntry": false,
       "cwd": "${workspaceFolder}/z21/src",
       "environment": [],
