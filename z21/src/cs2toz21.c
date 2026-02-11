@@ -113,6 +113,9 @@ struct z21_data_t z21_data;
 struct z21_config_data_t config_data;
 extern char rfc3986[256];
 
+/* optional direct TCP target IP (e.g. iPhone) to send Data.z21 */
+static char *z21_tcp_target_ip = NULL;
+
 /* local polling interval (ms) for file watcher, configurable via -F */
 static int file_poll_interval_ms = FILE_POLL_INTERVAL_MS;
 
@@ -137,10 +140,6 @@ struct known_uid_t {
 };
 static struct known_uid_t *known_uids = NULL;
 
-/* track current zip file name and path for TCP transfer */
-static char current_zip_path[64] = "/tmp/Data.z21";
-static char current_zip_name[32] = "Data.z21";
-
 static int known_uid_exists(unsigned int uid) {
     struct known_uid_t *e = NULL;
     HASH_FIND(hh, known_uids, &uid, sizeof(unsigned int), e);
@@ -163,12 +162,13 @@ void print_usage(char *prg) {
     fprintf(stderr, "         -a <time_out>       try to find CS2/CS2 for <time_out> seconds using -i <interface list>\n");
     fprintf(stderr, "         -c <config_dir>     set the config directory - default %s\n", config_data.config_dir);
     fprintf(stderr, "         -i <interface list> interface list - default %s\n", INTERFACE_LIST);
+    fprintf(stderr, "         -t <ip>            direct TCP target IP (send file via TCP)\n");
     fprintf(stderr, "         -s <link to config> link to the lokomotive.cs2\n");
     fprintf(stderr, "         -p <link to icons>  link to the icons server directory\n");
     fprintf(stderr, "         -v                  verbose\n\n");
 }
 
-int send_tcp_data(struct sockaddr_in *client_sa) {
+int send_tcp_data(struct sockaddr_in *client_sa, const char *zip_name) {
     int n, st;
     size_t b;
     FILE *fp;
@@ -176,9 +176,12 @@ int send_tcp_data(struct sockaddr_in *client_sa) {
     char *offer;
     char *buffer;
     int32_t filesize;
-    fp = fopen(current_zip_path, "rb");
+    char path[128];
+
+    snprintf(path, sizeof path, "/tmp/%s", zip_name);
+    fp = fopen(path, "rb");
     if (!fp) {
-        fprintf(stderr, "can't open Z21 data %s: %s\n", current_zip_path, strerror(errno));
+        fprintf(stderr, "can't open Z21 data %s: %s\n", path, strerror(errno));
         return EXIT_FAILURE;
     }
 
@@ -205,10 +208,11 @@ int send_tcp_data(struct sockaddr_in *client_sa) {
         fclose(fp);
         return (EXIT_FAILURE);
     }
-    asprintf(&offer, "{\"owningDevice\":{\"os\":\"android\",\"appVersion\":\"1.4.7\",\"deviceName\":\"Z21 Emulator\",\"deviceType\":\"OpenWRT\","
-                     "\"request\":\"device_information_request\",\"buildNumber\":6076,\"apiVersion\":1},\"fileName\":\"%s\","
-                     "\"request\":\"file_transfer_info\",\"fileSize\":%d}\n",
-             current_zip_name, filesize);
+        asprintf(&offer,
+                 "{\"owningDevice\":{\"os\":\"android\",\"appVersion\":\"1.4.7\",\"deviceName\":\"Z21 Emulator\",\"deviceType\":\"OpenWRT\","
+                 "\"request\":\"device_information_request\",\"buildNumber\":6076,\"apiVersion\":1},\"fileName\":\"%s\","
+                 "\"request\":\"file_transfer_info\",\"fileSize\":%d}\n",
+                 zip_name, filesize);
     v_printf(config_data.verbose, "send TCP\n%s", offer);
     send(st, offer, strlen(offer), 0);
     free(offer);
@@ -250,126 +254,40 @@ int send_tcp_data(struct sockaddr_in *client_sa) {
     return EXIT_SUCCESS;
 }
 
-int send_udp_broadcast(void) {
-    int n, sa, sb;
-    struct sockaddr_in baddr, saddr;
+/* send Z21 file directly via TCP to the configured target IP (-t)
+ * which == 0 -> Data.z21 (full)
+ * which == 1 -> Data.z21loco (incremental)
+ */
+int send_z21_file(int which) {
     struct sockaddr_in client;
-    struct timeval tv;
-    char buffer[64];
-    socklen_t len;
-    fd_set readfds;
+    const char *zip_name;
 
-    int destination_port = Z21PORT;
-    int local_port = Z21PORT;
-    memset(&baddr, 0, sizeof baddr);
-    memset(&saddr, 0, sizeof saddr);
-    memset(&client, 0, sizeof client);
-
-    /* prepare UDP sending socket */
-    sb = setup_udp_socket(&baddr, "255.255.255.255", destination_port, UDP_SENDING);
-    if (sb <= 0) {
-        fprintf(stderr, "problem to setup UDP (Z21 App) sending socket\n");
-        exit(EXIT_FAILURE);
-    }
-
-    /* prepare receiving socket */
-    sa = setup_udp_socket(&saddr, NULL, local_port, UDP_READING);
-    if (sa <= 0) {
-        fprintf(stderr, "problem to setup UDP (Z21 App) receiving socket\n");
-        exit(EXIT_FAILURE);
-    }
-
-    /* get timestamp */
-    gettimeofday(&tv, NULL);
-    unsigned long long millisecondsSinceEpoch =
-        (unsigned long long)(tv.tv_sec) * 1000 +
-        (unsigned long long)(tv.tv_usec) / 1000;
-
-    asprintf(&timestamp, "%llu", millisecondsSinceEpoch);
-
-    if (sendto(sb, timestamp, strlen(timestamp), 0, (struct sockaddr *)&baddr, sizeof baddr) != strlen(timestamp))
-        fprintf(stderr, "UDP write error: %s\n", strerror(errno));
-
-    FD_ZERO(&readfds);
-    FD_SET(sa, &readfds);
-    while (1) {
-        if (select(sa + 1, &readfds, NULL, NULL, NULL) < 0) {
-            fprintf(stderr, "select error: %s\n", strerror(errno));
-        };
-
-        if (FD_ISSET(sa, &readfds)) {
-            len = sizeof client;
-            n = recvfrom(sa, udpframe, sizeof udpframe, 0, (struct sockaddr *)&client, &len);
-            v_printf(config_data.verbose, "received UDP packet len %d from %s\n", n, inet_ntop(AF_INET, &client.sin_addr, buffer, sizeof buffer));
-            if (n > 0) {
-                udpframe[n + 1] = 0;
-                /* look for different packet than the sent packet */
-                if (memcmp(timestamp, udpframe, strlen(timestamp)) != 0) {
-                    v_printf(config_data.verbose, "%s\n", udpframe);
-                    send_tcp_data(&client);
-                }
-            }
-        }
-    }
-    return EXIT_SUCCESS;
-}
-
-/* send a single broadcast and serve first client, then return */
-int send_udp_broadcast_once(void) {
-    int n, sa, sb;
-    struct sockaddr_in baddr, saddr;
-    struct sockaddr_in client;
-    struct timeval tv;
-    char buffer[64];
-    socklen_t len;
-    fd_set readfds;
-
-    int destination_port = Z21PORT;
-    int local_port = Z21PORT;
-    memset(&baddr, 0, sizeof baddr);
-    memset(&saddr, 0, sizeof saddr);
-    memset(&client, 0, sizeof client);
-
-    sb = setup_udp_socket(&baddr, "255.255.255.255", destination_port, UDP_SENDING);
-    if (sb <= 0) {
-        fprintf(stderr, "problem to setup UDP (Z21 App) sending socket\n");
-        return EXIT_FAILURE;
-    }
-    sa = setup_udp_socket(&saddr, NULL, local_port, UDP_READING);
-    if (sa <= 0) {
-        fprintf(stderr, "problem to setup UDP (Z21 App) receiving socket\n");
+    if (!z21_tcp_target_ip) {
+        fprintf(stderr, "no TCP target IP specified (use -t <ip>)\n");
         return EXIT_FAILURE;
     }
 
-    gettimeofday(&tv, NULL);
-    unsigned long long millisecondsSinceEpoch =
-        (unsigned long long)(tv.tv_sec) * 1000 +
-        (unsigned long long)(tv.tv_usec) / 1000;
-    asprintf(&timestamp, "%llu", millisecondsSinceEpoch);
-
-    if (sendto(sb, timestamp, strlen(timestamp), 0, (struct sockaddr *)&baddr, sizeof baddr) != strlen(timestamp))
-        fprintf(stderr, "UDP write error: %s\n", strerror(errno));
-
-    FD_ZERO(&readfds);
-    FD_SET(sa, &readfds);
-    struct timeval timeout;
-    timeout.tv_sec = 5;
-    timeout.tv_usec = 0;
-    if (select(sa + 1, &readfds, NULL, NULL, &timeout) < 0) {
-        fprintf(stderr, "select error: %s\n", strerror(errno));
-    } else if (FD_ISSET(sa, &readfds)) {
-        len = sizeof client;
-        n = recvfrom(sa, udpframe, sizeof udpframe, 0, (struct sockaddr *)&client, &len);
-        v_printf(config_data.verbose, "received UDP packet len %d from %s\n", n, inet_ntop(AF_INET, &client.sin_addr, buffer, sizeof buffer));
-        if (n > 0) {
-            udpframe[n + 1] = 0;
-            if (memcmp(timestamp, udpframe, strlen(timestamp)) != 0) {
-                v_printf(config_data.verbose, "%s\n", udpframe);
-                send_tcp_data(&client);
-            }
-        }
+    switch (which) {
+    case 0:
+        zip_name = "Data.z21";
+        break;
+    case 1:
+        zip_name = "Data.z21loco";
+        break;
+    default:
+        fprintf(stderr, "invalid Z21 file selector %d (use 0 or 1)\n", which);
+        return EXIT_FAILURE;
     }
-    return EXIT_SUCCESS;
+
+    memset(&client, 0, sizeof client);
+    client.sin_family = AF_INET;
+    if (inet_pton(AF_INET, z21_tcp_target_ip, &client.sin_addr) != 1) {
+        fprintf(stderr, "invalid TCP target IP: %s\n", z21_tcp_target_ip);
+        return EXIT_FAILURE;
+    }
+
+    v_printf(config_data.verbose, "Direct TCP send to %s:%d (file %s)\n", z21_tcp_target_ip, Z21PORT, zip_name);
+    return send_tcp_data(&client, zip_name);
 }
 
 char *create_directory(char *basedir, char *uuidtext) {
@@ -526,8 +444,8 @@ int sql_insert_locos(sqlite3 *db, struct z21_config_data_t *config_data, char *z
     return EXIT_SUCCESS;
 }
 
-/* build Data.z21 for either all locos or only newly added UIDs, then send once */
-int build_and_send_z21_package(int only_new) {
+/* build Data.z21 for either all locos or only newly added UIDs. */
+int build_z21_package(int only_new) {
     int ret;
     sqlite3 *db;
     FILE *fp;
@@ -587,8 +505,6 @@ int build_and_send_z21_package(int only_new) {
 
     /* choose zip name: full on initial/all import, incremental otherwise */
     const char *zip_name = insert_all ? "Data.z21" : "Data.z21loco";
-    snprintf(current_zip_name, sizeof current_zip_name, "%s", zip_name);
-    snprintf(current_zip_path, sizeof current_zip_path, "/tmp/%s", zip_name);
     asprintf(&systemcmd, "cd /tmp; minizip -i -o %s export/%s/* 2>&1 > /dev/null", zip_name, local_uuidtext);
     v_printf(config_data.verbose, "Zipping %s\n", systemcmd);
     system(systemcmd);
@@ -597,7 +513,7 @@ int build_and_send_z21_package(int only_new) {
     system(systemcmd);
     free(systemcmd);
 
-    return send_udp_broadcast_once();
+    return EXIT_SUCCESS;
 }
 
 /*
@@ -617,7 +533,9 @@ static int reload_and_send_if_new_file(const char *loco_file) {
             new_count++;
     }
     if (new_count > 0) {
-        build_and_send_z21_package(1);
+        build_z21_package(0); //build all in case, new Z21-App gets connected and needs full configuration
+        build_z21_package(1); //build incremental for existing Z21-App, so only new locos are added
+        send_z21_file(1);
     }
     return new_count;
 }
@@ -646,7 +564,9 @@ static int reload_and_send_if_new_url(const char *config_url) {
             new_count++;
     }
     if (new_count > 0) {
-        build_and_send_z21_package(1);
+        build_z21_package(0); //build all in case, new Z21-App gets connected and needs full configuration
+        build_z21_package(1); //build incremental for existing Z21-App, so only new locos are added
+        send_z21_file(1);
     }
     return new_count;
 }
@@ -717,19 +637,14 @@ static void watch_network_timer(const char *config_url) {
 }
 
 int main(int argc, char **argv) {
-    FILE *fp;
-    char *broadcast_ip, *config_file, *loco_file, *interface_list;
-    int opt, ret;
-    sqlite3 *db;
-    char *z21_dir, *sql_file, *icon_dir, *systemcmd;
-    uuid_t z21_uuid;
-    char uuidtext[UUIDTEXTSIZE];
+    char *config_file, *loco_file, *interface_list;
+    int opt;
 
     memset(&config_data, 0, sizeof config_data);
     config_data.config_dir = strdup("/www");
     interface_list = strdup(INTERFACE_LIST);
 
-    while ((opt = getopt(argc, argv, "a:c:i:p:s:f:vh?")) != -1) {
+    while ((opt = getopt(argc, argv, "a:c:i:p:s:f:t:vh?")) != -1) {
         switch (opt) {
         case 'a':
             config_data.auto_timeout = atoi(optarg);
@@ -773,6 +688,14 @@ int main(int argc, char **argv) {
             if (file_poll_interval_ms < 100)
                 file_poll_interval_ms = 100;
             break;
+        case 't':
+            if (strnlen(optarg, MAXLINE) < MAXLINE) {
+                z21_tcp_target_ip = strndup(optarg, MAXLINE - 1);
+            } else {
+                fprintf(stderr, "TCP target IP to long\n");
+                exit(EXIT_FAILURE);
+            }
+            break;
         case 'v':
             config_data.verbose = 1;
             break;
@@ -787,6 +710,7 @@ int main(int argc, char **argv) {
     /* we try to find the CS2 IP */
     if (config_data.auto_timeout) {
         /* find the broadcast address */
+        char *broadcast_ip;
         if (!(broadcast_ip = find_first_ip(interface_list, BROADCAST_IP))) {
             fprintf(stderr, "can't find a valid broadcast IP on list: %s\n", interface_list);
             exit(EXIT_FAILURE);
@@ -839,10 +763,9 @@ int main(int argc, char **argv) {
     v_printf(config_data.verbose, "\nlocos in CS2 File: %u\n", HASH_COUNT(loco_data));
 
     /* initial build & send via incremental path: known set is empty, so all are treated as new */
-    build_and_send_z21_package(1);
-
-    /* known_uid_add is handled inside build_and_send_z21_package for full import */
-
+    build_z21_package(0);
+    send_z21_file(0); //TODO: Debugging only
+    
     /* Start watcher modes: file (-c) uses inotify; network (-s or autodetected) uses timer. */
     if (!config_data.config_server) {
         watch_file_inotify(loco_file);
