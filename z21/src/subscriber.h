@@ -29,6 +29,7 @@ struct subscriber_t {
 int add_z21c_ip(uint32_t ip, uint16_t port, int verbose);
 int del_z21c_ip(uint32_t ip);
 int set_z21c_bcf(uint32_t ip, uint32_t broadcast_flags);
+void z21_notify_new_client(uint32_t ip);
 
 
 #endif /* _SUBSCRIBER_H */

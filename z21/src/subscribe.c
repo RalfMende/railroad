@@ -53,6 +53,7 @@ int add_z21c_ip(uint32_t ip, uint16_t port, int verbose) {
 	if (verbose)
 	    printf("Client IP added %s\n", inet_ntoa(sub->client_addr.sin_addr));
 	HASH_ADD(hh, subscriber, ip, sizeof(uint32_t), sub);
+		z21_notify_new_client(ip);
     }
 
     pthread_mutex_unlock(&lock);

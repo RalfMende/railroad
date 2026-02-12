@@ -38,6 +38,7 @@
 #include "cs2-data-functions.h"
 #include "read-cs2-config.h"
 #include "subscriber.h"
+#include "uthash.h"
 #include "measurement.h"
 #include "utils.h"
 #ifndef NO_XPN_TTY
@@ -58,6 +59,13 @@ struct z21_data_t z21_data;
 extern struct loco_data_t *loco_data, *loco_data_by_uid;
 extern struct magnet_data_t *magnet_data;
 extern struct subscriber_t *subscriber;
+
+/* IPC to cs2toz21: local UDP socket and peer address */
+static int ipc_sock = -1;
+static struct sockaddr_in ipc_addr;
+static struct sockaddr_in cs2toz21_addr;
+static int ipc_have_cs2 = 0;
+
 #ifndef NO_XPN_TTY
 struct xpn_tty_t xpn_tty;
 
@@ -835,6 +843,40 @@ void *z21_periodic_tasks(void *ptr) {
     }
 }
 
+void z21_notify_new_client(uint32_t ip) {
+	if (ipc_sock < 0 || !ipc_have_cs2)
+		return;
+
+	struct in_addr ia;
+	char buf[64];
+
+	ia.s_addr = ip;
+	snprintf(buf, sizeof buf, "NEW %s\n", inet_ntoa(ia));
+	sendto(ipc_sock, buf, strlen(buf), 0, (struct sockaddr *)&cs2toz21_addr, sizeof cs2toz21_addr);
+}
+
+static void ipc_init(void) {
+	if (ipc_sock >= 0)
+		return;
+
+	ipc_sock = socket(AF_INET, SOCK_DGRAM, 0);
+	if (ipc_sock < 0) {
+		fprintf(stderr, "can't create IPC UDP socket: %s\n", strerror(errno));
+		return;
+	}
+
+	memset(&ipc_addr, 0, sizeof ipc_addr);
+	ipc_addr.sin_family = AF_INET;
+	ipc_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+	ipc_addr.sin_port = htons(Z21_IPC_PORT);
+
+	if (bind(ipc_sock, (struct sockaddr *)&ipc_addr, sizeof ipc_addr) < 0) {
+		fprintf(stderr, "can't bind IPC UDP socket on port %d: %s\n", Z21_IPC_PORT, strerror(errno));
+		close(ipc_sock);
+		ipc_sock = -1;
+	}
+}
+
 int main(int argc, char **argv) {
     pid_t pid;
     pthread_t pth;
@@ -946,7 +988,10 @@ int main(int argc, char **argv) {
 	exit(EXIT_FAILURE);
     }
 
-    if (strlen(ifr.ifr_name)) {
+	/* prepare local IPC UDP socket for communication with cs2toz21 */
+	ipc_init();
+
+	if (strlen(ifr.ifr_name)) {
 #ifndef NO_CAN
 	/* prepare CAN socket */
 	printf("ifr.ifr_name: >%s<\n", ifr.ifr_name);
@@ -1045,12 +1090,17 @@ int main(int argc, char **argv) {
 	FD_ZERO(&readfds);
 	FD_SET(z21_data.sp, &readfds);
 	FD_SET(z21_data.ss, &readfds);
+	max_fds = MAX(z21_data.sp, z21_data.ss);
 	if (z21_data.st) {
 	    FD_SET(z21_data.st, &readfds);
-	    max_fds = MAX(MAX(z21_data.sp, z21_data.ss), z21_data.st);
+	    max_fds = MAX(max_fds, z21_data.st);
 	} else {
 	    FD_SET(z21_data.sc, &readfds);
-	    max_fds = MAX(MAX(z21_data.sp, z21_data.ss), z21_data.sc);
+	    max_fds = MAX(max_fds, z21_data.sc);
+	}
+	if (ipc_sock >= 0) {
+	    FD_SET(ipc_sock, &readfds);
+	    max_fds = MAX(max_fds, ipc_sock);
 	}
 #ifndef NO_XPN_TTY
 	if (xpn_tty.fd) {
@@ -1066,6 +1116,31 @@ int main(int argc, char **argv) {
 	if (FD_ISSET(z21_data.sc, &readfds)) {
 	}
 #endif
+
+	/* IPC: handle requests from cs2toz21 (HELLO/LIST) */
+	if (ipc_sock >= 0 && FD_ISSET(ipc_sock, &readfds)) {
+	    char buf[128];
+	    struct sockaddr_in src;
+	    socklen_t srclen = sizeof src;
+	    int n = recvfrom(ipc_sock, buf, sizeof buf - 1, 0, (struct sockaddr *)&src, &srclen);
+	    if (n > 0) {
+		buf[n] = '\0';
+		if (!strncmp(buf, "HELLO", 5) || !strncmp(buf, "LIST", 4)) {
+		    struct subscriber_t *sub, *tmp;
+		    cs2toz21_addr = src;
+		    ipc_have_cs2 = 1;
+		    HASH_ITER(hh, subscriber, sub, tmp) {
+			char ipbuf[64];
+			snprintf(ipbuf, sizeof ipbuf, "CLIENT %s\n", inet_ntoa(sub->client_addr.sin_addr));
+			sendto(ipc_sock, ipbuf, strlen(ipbuf), 0, (struct sockaddr *)&cs2toz21_addr, sizeof cs2toz21_addr);
+		    }
+		    {
+			const char endmsg[] = "END\n";
+			sendto(ipc_sock, endmsg, sizeof endmsg - 1, 0, (struct sockaddr *)&cs2toz21_addr, sizeof cs2toz21_addr);
+		    }
+		}
+	    }
+	}
 
 	/* received a UDP packet on primary */
 	if (FD_ISSET(z21_data.sp, &readfds)) {

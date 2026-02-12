@@ -113,10 +113,8 @@ struct z21_data_t z21_data;
 struct z21_config_data_t config_data;
 extern char rfc3986[256];
 
-/* optional direct TCP target IP (e.g. iPhone) to send Data.z21 */
 static char *z21_tcp_target_ip = NULL;
 
-/* local polling interval (ms) for file watcher, configurable via -F */
 static int file_poll_interval_ms = FILE_POLL_INTERVAL_MS;
 
 #define SQL_EXEC(SQL)                                    \
@@ -133,32 +131,22 @@ static int file_poll_interval_ms = FILE_POLL_INTERVAL_MS;
 unsigned char udpframe[MAXDG];
 extern struct loco_data_t *loco_data;
 
-/* track known locomotive UIDs to detect new entries */
 struct known_uid_t {
     unsigned int uid;
     UT_hash_handle hh;
 };
 static struct known_uid_t *known_uids = NULL;
 
-static int known_uid_exists(unsigned int uid) {
-    struct known_uid_t *e = NULL;
-    HASH_FIND(hh, known_uids, &uid, sizeof(unsigned int), e);
-    return e != NULL;
-}
+static int ipc_sock = -1;
+static struct sockaddr_in ipc_server_addr;
+static int ipc_available = 0;
 
-static void known_uid_add(unsigned int uid) {
-    if (known_uid_exists(uid))
-        return;
-    struct known_uid_t *e = calloc(1, sizeof *e);
-    if (!e)
-        return;
-    e->uid = uid;
-    HASH_ADD(hh, known_uids, uid, sizeof(unsigned int), e);
-}
-
+/*
+ * Print command line usage information and available options.
+ */
 void print_usage(char *prg) {
     fprintf(stderr, "\nUsage: %s -v -c <config_dir> -i <interface list> -s <config link> -p <icons link>\n", prg);
-    fprintf(stderr, "   Version 0.992\n\n");
+    fprintf(stderr, "   Version 1.0.0\n\n");
     fprintf(stderr, "         -a <time_out>       try to find CS2/CS2 for <time_out> seconds using -i <interface list>\n");
     fprintf(stderr, "         -c <config_dir>     set the config directory - default %s\n", config_data.config_dir);
     fprintf(stderr, "         -i <interface list> interface list - default %s\n", INTERFACE_LIST);
@@ -168,6 +156,11 @@ void print_usage(char *prg) {
     fprintf(stderr, "         -v                  verbose\n\n");
 }
 
+/*
+ * Open the given ZIP file and send it via TCP to the specified
+ * Z21 App client. Waits for an "install" acknowledgement and
+ * then streams the file contents.
+ */
 int send_tcp_data(struct sockaddr_in *client_sa, const char *zip_name) {
     int n, st;
     size_t b;
@@ -254,18 +247,13 @@ int send_tcp_data(struct sockaddr_in *client_sa, const char *zip_name) {
     return EXIT_SUCCESS;
 }
 
-/* send Z21 file directly via TCP to the configured target IP (-t)
- * which == 0 -> Data.z21 (full)
- * which == 1 -> Data.z21loco (incremental)
+/*
+ * Helper: send a Z21 data file (full or incremental) to a specific IP via TCP.
+ * which == 0 -> Data.z21, which == 1 -> Data.z21loco
  */
-int send_z21_file(int which) {
+static int send_z21_file_to_ip(int which, const char *ip) {
     struct sockaddr_in client;
     const char *zip_name;
-
-    if (!z21_tcp_target_ip) {
-        fprintf(stderr, "no TCP target IP specified (use -t <ip>)\n");
-        return EXIT_FAILURE;
-    }
 
     switch (which) {
     case 0:
@@ -281,15 +269,56 @@ int send_z21_file(int which) {
 
     memset(&client, 0, sizeof client);
     client.sin_family = AF_INET;
-    if (inet_pton(AF_INET, z21_tcp_target_ip, &client.sin_addr) != 1) {
-        fprintf(stderr, "invalid TCP target IP: %s\n", z21_tcp_target_ip);
+    if (inet_pton(AF_INET, ip, &client.sin_addr) != 1) {
+        fprintf(stderr, "invalid TCP target IP: %s\n", ip);
         return EXIT_FAILURE;
     }
 
-    v_printf(config_data.verbose, "Direct TCP send to %s:%d (file %s)\n", z21_tcp_target_ip, Z21PORT, zip_name);
+    v_printf(config_data.verbose, "Direct TCP send to %s:%d (file %s)\n", ip, Z21PORT, zip_name);
     return send_tcp_data(&client, zip_name);
 }
 
+/* send Z21 file directly via TCP to the configured target IP (-t)
+ * which == 0 -> Data.z21 (full)
+ * which == 1 -> Data.z21loco (incremental)
+ */
+int send_z21_file(int which) {
+    if (!z21_tcp_target_ip) {
+        fprintf(stderr, "no TCP target IP specified (use -t <ip>)\n");
+        return EXIT_FAILURE;
+    }
+    return send_z21_file_to_ip(which, z21_tcp_target_ip);
+}
+
+/*
+ * Return non-zero if the given locomotive UID is already
+ * present in the known_uids hash table.
+ */
+static int known_uid_exists(unsigned int uid) {
+    struct known_uid_t *e = NULL;
+    HASH_FIND(hh, known_uids, &uid, sizeof(unsigned int), e);
+    return e != NULL;
+}
+
+/*
+ * Add the given locomotive UID to the known_uids hash table
+ * if it is not already present.
+ */
+static void known_uid_add(unsigned int uid) {
+    if (known_uid_exists(uid))
+        return;
+    struct known_uid_t *e = calloc(1, sizeof *e);
+    if (!e)
+        return;
+    e->uid = uid;
+    HASH_ADD(hh, known_uids, uid, sizeof(unsigned int), e);
+}
+
+/*
+ * Create the export directory hierarchy below basedir using the
+ * given UUID string. Returns the full path of the leaf directory
+ * or NULL on error.
+ */
 char *create_directory(char *basedir, char *uuidtext) {
     struct stat st;
     char *dir;
@@ -318,6 +347,10 @@ char *create_directory(char *basedir, char *uuidtext) {
     return dir;
 }
 
+/*
+ * Copy the contents of the file src to dst using a simple
+ * buffered read/write loop. Returns EXIT_SUCCESS on success.
+ */
 int copy_file(char *src, char *dst) {
     char c[4096];
     FILE *fd_in, *fd_out;
@@ -349,6 +382,10 @@ int copy_file(char *src, char *dst) {
     return EXIT_SUCCESS;
 }
 
+/*
+ * Update the update_history table in the Z21 SQLite database
+ * with the current timestamp and fixed version information.
+ */
 int sql_update_history(sqlite3 *db) {
     int ret;
     char *err_msg;
@@ -517,6 +554,12 @@ int build_z21_package(int only_new) {
 }
 
 /*
+ * Forward declarations for IPC helper functions used below.
+ */
+static void ipc_poll_new_clients(void);
+static void ipc_send_file_to_all_clients(int which);
+
+/*
  * Helper: re-read loco file (local) and send incremental package if new UIDs appeared.
  * Returns number of new locos (>=0), or -1 on error.
  */
@@ -533,9 +576,9 @@ static int reload_and_send_if_new_file(const char *loco_file) {
             new_count++;
     }
     if (new_count > 0) {
-        build_z21_package(0); //build all in case, new Z21-App gets connected and needs full configuration
         build_z21_package(1); //build incremental for existing Z21-App, so only new locos are added
-        send_z21_file(1);
+        build_z21_package(0); //build all in case, new Z21-App gets connected and needs full configuration
+        ipc_send_file_to_all_clients(1); // send incremental update to all currently connected clients
     }
     return new_count;
 }
@@ -564,9 +607,9 @@ static int reload_and_send_if_new_url(const char *config_url) {
             new_count++;
     }
     if (new_count > 0) {
-        build_z21_package(0); //build all in case, new Z21-App gets connected and needs full configuration
         build_z21_package(1); //build incremental for existing Z21-App, so only new locos are added
-        send_z21_file(1);
+        build_z21_package(0); //build all in case, new Z21-App gets connected and needs full configuration
+        ipc_send_file_to_all_clients(1); // send incremental update to all currently connected clients
     }
     return new_count;
 }
@@ -607,21 +650,52 @@ static void watch_file_inotify(const char *loco_file) {
 
     char buf[4096] __attribute__((aligned(__alignof__(struct inotify_event))));
     for (;;) {
-        int len = read(fd, buf, sizeof buf);
-        if (len > 0) {
-            int i = 0;
-            while (i < len) {
-                struct inotify_event *event = (struct inotify_event *)&buf[i];
-                if (event->len > 0 && strcmp(event->name, watch_name) == 0) {
-                    if (event->mask & (IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_MODIFY | IN_ATTRIB | IN_DELETE)) {
-                        usleep(200000);
-                        reload_and_send_if_new_file(loco_file);
+        fd_set rfds;
+        int maxfd = fd;
+        int ret;
+
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        if (ipc_sock >= 0) {
+            FD_SET(ipc_sock, &rfds);
+            if (ipc_sock > maxfd)
+                maxfd = ipc_sock;
+        }
+
+        /* Block, bis entweder eine Dateiänderung oder eine IPC-Nachricht anliegt */
+        ret = select(maxfd + 1, &rfds, NULL, NULL, NULL);
+        if (ret < 0) {
+            if (errno == EINTR)
+                continue;
+            fprintf(stderr, "select failed: %s\n", strerror(errno));
+            close(fd);
+            free(dup1);
+            free(dup2);
+            exit(EXIT_FAILURE);
+        }
+
+        /* IPC: neue Clients von z21emu */
+        if (ipc_sock >= 0 && FD_ISSET(ipc_sock, &rfds)) {
+            ipc_poll_new_clients();
+        }
+
+        /* inotify: Dateiänderungen lokomotive.cs2 */
+        if (FD_ISSET(fd, &rfds)) {
+            int len = read(fd, buf, sizeof buf);
+            if (len > 0) {
+                int i = 0;
+                while (i < len) {
+                    struct inotify_event *event = (struct inotify_event *)&buf[i];
+                    if (event->len > 0 && strcmp(event->name, watch_name) == 0) {
+                        if (event->mask & (IN_CLOSE_WRITE | IN_MOVED_TO | IN_CREATE | IN_MODIFY | IN_ATTRIB | IN_DELETE)) {
+                            /* debounce wie bisher */
+                            usleep(200000);
+                            reload_and_send_if_new_file(loco_file);
+                        }
                     }
+                    i += sizeof(struct inotify_event) + event->len;
                 }
-                i += sizeof(struct inotify_event) + event->len;
             }
-        } else {
-            usleep(200000);
         }
     }
 }
@@ -631,11 +705,212 @@ static void watch_file_inotify(const char *loco_file) {
  */
 static void watch_network_timer(const char *config_url) {
     for (;;) {
+        /* handle asynchronous IPC notifications about new clients */
+        ipc_poll_new_clients();
+
         usleep(NET_POLL_INTERVAL_MS * 1000);
         reload_and_send_if_new_url(config_url);
     }
 }
 
+
+/*
+ * Initialize IPC socket to z21emu and perform an initial HELLO/list exchange.
+ * For every known client IP, send a full Data.z21 package.
+ * Blocks and retries until z21emu answers.
+ */
+static void ipc_init_and_sync(void) {
+    if (ipc_sock >= 0 && ipc_available)
+        return;
+
+    if (ipc_sock < 0) {
+        ipc_sock = socket(AF_INET, SOCK_DGRAM, 0);
+        if (ipc_sock < 0) {
+            fprintf(stderr, "can't create IPC UDP socket: %s\n", strerror(errno));
+            return;
+        }
+    }
+
+    memset(&ipc_server_addr, 0, sizeof ipc_server_addr);
+    ipc_server_addr.sin_family = AF_INET;
+    ipc_server_addr.sin_port = htons(Z21_IPC_PORT);
+    inet_aton("127.0.0.1", &ipc_server_addr.sin_addr);
+
+    v_printf(config_data.verbose, "Waiting for z21emu IPC on 127.0.0.1:%d ...\n", Z21_IPC_PORT);
+
+    while (!ipc_available) {
+        const char hello[] = "HELLO\n";
+        ssize_t s = sendto(ipc_sock, hello, sizeof hello - 1, 0,
+                           (struct sockaddr *)&ipc_server_addr, sizeof ipc_server_addr);
+        if (s < 0) {
+            fprintf(stderr, "IPC send HELLO failed: %s\n", strerror(errno));
+        }
+
+        /* wait for CLIENT/END responses */
+        for (;;) {
+            fd_set rfds;
+            struct timeval tv;
+            int ret;
+
+            FD_ZERO(&rfds);
+            FD_SET(ipc_sock, &rfds);
+            tv.tv_sec = 5;
+            tv.tv_usec = 0;
+
+            ret = select(ipc_sock + 1, &rfds, NULL, NULL, &tv);
+            if (ret < 0) {
+                if (errno == EINTR)
+                    continue;
+                fprintf(stderr, "IPC select error: %s\n", strerror(errno));
+                break;
+            } else if (ret == 0) {
+                /* timeout, retry HELLO */
+                break;
+            }
+
+            if (FD_ISSET(ipc_sock, &rfds)) {
+                char buf[128];
+                ssize_t n;
+                struct sockaddr_in src;
+                socklen_t slen = sizeof src;
+
+                n = recvfrom(ipc_sock, buf, sizeof buf - 1, 0,
+                             (struct sockaddr *)&src, &slen);
+                if (n <= 0)
+                    continue;
+                buf[n] = '\0';
+
+                if (!strncmp(buf, "CLIENT ", 7)) {
+                    char *ip = buf + 7;
+                    char *nl = strchr(ip, '\n');
+                    if (nl)
+                        *nl = '\0';
+                    send_z21_file_to_ip(0, ip);
+                } else if (!strncmp(buf, "END", 3)) {
+                    ipc_available = 1;
+                    v_printf(config_data.verbose, "IPC initial sync complete.\n");
+                    return;
+                } else if (!strncmp(buf, "NEW ", 4)) {
+                    /* treat NEW like CLIENT during initial sync */
+                    char *ip = buf + 4;
+                    char *nl = strchr(ip, '\n');
+                    if (nl)
+                        *nl = '\0';
+                    send_z21_file_to_ip(0, ip);
+                }
+            }
+        }
+
+        /* wait a bit before re-trying HELLO */
+        sleep(1);
+    }
+}
+
+/*
+ * Non-blocking poll for IPC NEW notifications from z21emu.
+ * For each "NEW <ip>" message, send a full Data.z21 package to that client.
+ */
+static void ipc_poll_new_clients(void) {
+    if (ipc_sock < 0)
+        return;
+
+    for (;;) {
+        char buf[128];
+        ssize_t n;
+        struct sockaddr_in src;
+        socklen_t slen = sizeof src;
+
+        n = recvfrom(ipc_sock, buf, sizeof buf - 1, MSG_DONTWAIT,
+                     (struct sockaddr *)&src, &slen);
+        if (n <= 0)
+            break;
+        buf[n] = '\0';
+
+        if (!strncmp(buf, "NEW ", 4)) {
+            char *ip = buf + 4;
+            char *nl = strchr(ip, '\n');
+            if (nl)
+                *nl = '\0';
+            send_z21_file_to_ip(0, ip);
+        }
+    }
+}
+
+/*
+ * Request the current list of clients from z21emu and send a Z21 file
+ * (full or incremental) to each of them.
+ */
+static void ipc_send_file_to_all_clients(int which) {
+    if (ipc_sock < 0)
+        return;
+
+    const char list_cmd[] = "LIST\n";
+    ssize_t s = sendto(ipc_sock, list_cmd, sizeof list_cmd - 1, 0,
+                       (struct sockaddr *)&ipc_server_addr, sizeof ipc_server_addr);
+    if (s < 0) {
+        fprintf(stderr, "IPC send LIST failed: %s\n", strerror(errno));
+        return;
+    }
+
+    for (;;) {
+        fd_set rfds;
+        struct timeval tv;
+        int ret;
+
+        FD_ZERO(&rfds);
+        FD_SET(ipc_sock, &rfds);
+        tv.tv_sec = 5;
+        tv.tv_usec = 0;
+
+        ret = select(ipc_sock + 1, &rfds, NULL, NULL, &tv);
+        if (ret < 0) {
+            if (errno == EINTR)
+                continue;
+            fprintf(stderr, "IPC select error during LIST: %s\n", strerror(errno));
+            break;
+        } else if (ret == 0) {
+            /* timeout */
+            break;
+        }
+
+        if (FD_ISSET(ipc_sock, &rfds)) {
+            char buf[128];
+            ssize_t n;
+            struct sockaddr_in src;
+            socklen_t slen = sizeof src;
+
+            n = recvfrom(ipc_sock, buf, sizeof buf - 1, 0,
+                         (struct sockaddr *)&src, &slen);
+            if (n <= 0)
+                continue;
+            buf[n] = '\0';
+
+            if (!strncmp(buf, "CLIENT ", 7)) {
+                char *ip = buf + 7;
+                char *nl = strchr(ip, '\n');
+                if (nl)
+                    *nl = '\0';
+                send_z21_file_to_ip(which, ip);
+            } else if (!strncmp(buf, "END", 3)) {
+                break;
+            } else if (!strncmp(buf, "NEW ", 4)) {
+                /* handle asynchronous NEW while we are waiting */
+                char *ip = buf + 4;
+                char *nl = strchr(ip, '\n');
+                if (nl)
+                    *nl = '\0';
+                send_z21_file_to_ip(0, ip);
+            }
+        }
+    }
+}
+
+/*
+ * Program entry point: parse command line options, load the CS2
+ * loco configuration, build the initial Z21 package and then
+ * watch for configuration changes (file or HTTP) while serving
+ * updates to all connected Z21 App clients via z21emu IPC.
+ */
 int main(int argc, char **argv) {
     char *config_file, *loco_file, *interface_list;
     int opt;
@@ -762,9 +1037,10 @@ int main(int argc, char **argv) {
     }
     v_printf(config_data.verbose, "\nlocos in CS2 File: %u\n", HASH_COUNT(loco_data));
 
-    /* initial build & send via incremental path: known set is empty, so all are treated as new */
+    /* initial build & send: create full package and push it to all
+     * currently connected Z21 App clients via z21emu IPC */
     build_z21_package(0);
-    send_z21_file(0); //TODO: Debugging only
+    ipc_init_and_sync();
     
     /* Start watcher modes: file (-c) uses inotify; network (-s or autodetected) uses timer. */
     if (!config_data.config_server) {

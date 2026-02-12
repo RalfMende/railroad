@@ -61,5 +61,15 @@
       ],
       "preLaunchTask": "z21: Build all"
     }
+  ],
+  "compounds": [
+    {
+      "name": "Debug z21emu + cs2toz21",
+      "configurations": [
+        "Debug z21emu (config in /www/config)",
+        "Debug cs2toz21 (local /www/config)"
+      ],
+      "preLaunchTask": "z21: Build all"
+    }
   ]
 }

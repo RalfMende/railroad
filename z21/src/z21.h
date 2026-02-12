@@ -20,6 +20,7 @@
 #define PRIMARY_UDP_PORT	21105
 #define SECONDARY_UDP_PORT	21106
 #define MAERKLIN_PORT		15731
+#define Z21_IPC_PORT		57280	/* local UDP port for z21emu <-> cs2toz21 IPC */
 #define MAXSIZE			16384
 #define XPN_LAN_SOURCE		0
 #define XPN_TTY_SOURCE		1
