@@ -567,7 +567,7 @@ static int reload_and_send_if_new_file(const char *loco_file) {
     delete_all_loco_data();
     if (read_loco_data((char *)loco_file, CONFIG_FILE) < 0) {
         fprintf(stderr, "can't re-read loco file: %s\n", strerror(errno));
-        return -1;
+        return EXIT_FAILURE;
     }
     int new_count = 0;
     struct loco_data_t *l;
@@ -577,10 +577,10 @@ static int reload_and_send_if_new_file(const char *loco_file) {
     }
     if (new_count > 0) {
         build_z21_package(1); //build incremental for existing Z21-App, so only new locos are added
-        build_z21_package(0); //build all in case, new Z21-App gets connected and needs full configuration
         ipc_send_file_to_all_clients(1); // send incremental update to all currently connected clients
     }
-    return new_count;
+    build_z21_package(0); //build all in case, new Z21-App gets connected and needs full configuration
+    return EXIT_SUCCESS;
 }
 
 /*
@@ -591,13 +591,13 @@ static int reload_and_send_if_new_url(const char *config_url) {
     char *config_buf = get_url((char *)config_url, NULL, NULL);
     if (!config_buf) {
         fprintf(stderr, "can't fetch config from %s: %s\n", config_url, strerror(errno));
-        return -1;
+        return EXIT_FAILURE;
     }
     delete_all_loco_data();
     if (read_loco_data(config_buf, 0) < 0) {
         fprintf(stderr, "can't parse loco data from URL\n");
         free(config_buf);
-        return -1;
+        return EXIT_FAILURE;
     }
     free(config_buf);
     int new_count = 0;
@@ -608,10 +608,10 @@ static int reload_and_send_if_new_url(const char *config_url) {
     }
     if (new_count > 0) {
         build_z21_package(1); //build incremental for existing Z21-App, so only new locos are added
-        build_z21_package(0); //build all in case, new Z21-App gets connected and needs full configuration
         ipc_send_file_to_all_clients(1); // send incremental update to all currently connected clients
     }
-    return new_count;
+    build_z21_package(0); //build all in case, new Z21-App gets connected and needs full configuration
+    return EXIT_SUCCESS;
 }
 
 /*
