@@ -113,8 +113,6 @@ struct z21_data_t z21_data;
 struct z21_config_data_t config_data;
 extern char rfc3986[256];
 
-static char *z21_tcp_target_ip = NULL;
-
 static int file_poll_interval_ms = FILE_POLL_INTERVAL_MS;
 
 #define SQL_EXEC(SQL)                                    \
@@ -150,7 +148,6 @@ void print_usage(char *prg) {
     fprintf(stderr, "         -a <time_out>       try to find CS2/CS2 for <time_out> seconds using -i <interface list>\n");
     fprintf(stderr, "         -c <config_dir>     set the config directory - default %s\n", config_data.config_dir);
     fprintf(stderr, "         -i <interface list> interface list - default %s\n", INTERFACE_LIST);
-    fprintf(stderr, "         -t <ip>            direct TCP target IP (send file via TCP)\n");
     fprintf(stderr, "         -s <link to config> link to the lokomotive.cs2\n");
     fprintf(stderr, "         -p <link to icons>  link to the icons server directory\n");
     fprintf(stderr, "         -v                  verbose\n\n");
@@ -245,49 +242,6 @@ int send_tcp_data(struct sockaddr_in *client_sa, const char *zip_name) {
     free(buffer);
     fclose(fp);
     return EXIT_SUCCESS;
-}
-
-/*
- * Helper: send a Z21 data file (full or incremental) to a specific IP via TCP.
- * which == 0 -> Data.z21, which == 1 -> Data.z21loco
- */
-static int send_z21_file_to_ip(int which, const char *ip) {
-    struct sockaddr_in client;
-    const char *zip_name;
-
-    switch (which) {
-    case 0:
-        zip_name = "Data.z21";
-        break;
-    case 1:
-        zip_name = "Data.z21loco";
-        break;
-    default:
-        fprintf(stderr, "invalid Z21 file selector %d (use 0 or 1)\n", which);
-        return EXIT_FAILURE;
-    }
-
-    memset(&client, 0, sizeof client);
-    client.sin_family = AF_INET;
-    if (inet_pton(AF_INET, ip, &client.sin_addr) != 1) {
-        fprintf(stderr, "invalid TCP target IP: %s\n", ip);
-        return EXIT_FAILURE;
-    }
-
-    v_printf(config_data.verbose, "Direct TCP send to %s:%d (file %s)\n", ip, Z21PORT, zip_name);
-    return send_tcp_data(&client, zip_name);
-}
-
-/* send Z21 file directly via TCP to the configured target IP (-t)
- * which == 0 -> Data.z21 (full)
- * which == 1 -> Data.z21loco (incremental)
- */
-int send_z21_file(int which) {
-    if (!z21_tcp_target_ip) {
-        fprintf(stderr, "no TCP target IP specified (use -t <ip>)\n");
-        return EXIT_FAILURE;
-    }
-    return send_z21_file_to_ip(which, z21_tcp_target_ip);
 }
 
 /*
@@ -783,9 +737,13 @@ static void ipc_init_and_sync(void) {
                 if (!strncmp(buf, "CLIENT ", 7)) {
                     char *ip = buf + 7;
                     char *nl = strchr(ip, '\n');
+                    struct sockaddr_in client;
                     if (nl)
                         *nl = '\0';
-                    send_z21_file_to_ip(0, ip);
+                    memset(&client, 0, sizeof client);
+                    client.sin_family = AF_INET;
+                    inet_aton(ip, &client.sin_addr);
+                    send_tcp_data(&client, "Data.z21");
                 } else if (!strncmp(buf, "END", 3)) {
                     ipc_available = 1;
                     v_printf(config_data.verbose, "IPC initial sync complete.\n");
@@ -794,9 +752,13 @@ static void ipc_init_and_sync(void) {
                     /* treat NEW like CLIENT during initial sync */
                     char *ip = buf + 4;
                     char *nl = strchr(ip, '\n');
+                    struct sockaddr_in client;
                     if (nl)
                         *nl = '\0';
-                    send_z21_file_to_ip(0, ip);
+                    memset(&client, 0, sizeof client);
+                    client.sin_family = AF_INET;
+                    inet_aton(ip, &client.sin_addr);
+                    send_tcp_data(&client, "Data.z21");
                 }
             }
         }
@@ -829,9 +791,13 @@ static void ipc_poll_new_clients(void) {
         if (!strncmp(buf, "NEW ", 4)) {
             char *ip = buf + 4;
             char *nl = strchr(ip, '\n');
+            struct sockaddr_in client;
             if (nl)
                 *nl = '\0';
-            send_z21_file_to_ip(0, ip);
+            memset(&client, 0, sizeof client);
+            client.sin_family = AF_INET;
+            inet_aton(ip, &client.sin_addr);
+            send_tcp_data(&client, "Data.z21");
         }
     }
 }
@@ -888,18 +854,27 @@ static void ipc_send_file_to_all_clients(int which) {
             if (!strncmp(buf, "CLIENT ", 7)) {
                 char *ip = buf + 7;
                 char *nl = strchr(ip, '\n');
+                struct sockaddr_in client;
+                const char *zip_name = (which == 0) ? "Data.z21" : "Data.z21loco";
                 if (nl)
                     *nl = '\0';
-                send_z21_file_to_ip(which, ip);
+                memset(&client, 0, sizeof client);
+                client.sin_family = AF_INET;
+                inet_aton(ip, &client.sin_addr);
+                send_tcp_data(&client, zip_name);
             } else if (!strncmp(buf, "END", 3)) {
                 break;
             } else if (!strncmp(buf, "NEW ", 4)) {
                 /* handle asynchronous NEW while we are waiting */
                 char *ip = buf + 4;
                 char *nl = strchr(ip, '\n');
+                struct sockaddr_in client;
                 if (nl)
                     *nl = '\0';
-                send_z21_file_to_ip(0, ip);
+                memset(&client, 0, sizeof client);
+                client.sin_family = AF_INET;
+                inet_aton(ip, &client.sin_addr);
+                send_tcp_data(&client, "Data.z21");
             }
         }
     }
@@ -919,7 +894,7 @@ int main(int argc, char **argv) {
     config_data.config_dir = strdup("/www");
     interface_list = strdup(INTERFACE_LIST);
 
-    while ((opt = getopt(argc, argv, "a:c:i:p:s:f:t:vh?")) != -1) {
+    while ((opt = getopt(argc, argv, "a:c:i:p:s:f:vh?")) != -1) {
         switch (opt) {
         case 'a':
             config_data.auto_timeout = atoi(optarg);
@@ -962,14 +937,6 @@ int main(int argc, char **argv) {
             file_poll_interval_ms = atoi(optarg);
             if (file_poll_interval_ms < 100)
                 file_poll_interval_ms = 100;
-            break;
-        case 't':
-            if (strnlen(optarg, MAXLINE) < MAXLINE) {
-                z21_tcp_target_ip = strndup(optarg, MAXLINE - 1);
-            } else {
-                fprintf(stderr, "TCP target IP to long\n");
-                exit(EXIT_FAILURE);
-            }
             break;
         case 'v':
             config_data.verbose = 1;
