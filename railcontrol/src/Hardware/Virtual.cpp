@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -18,9 +18,9 @@ along with RailControl; see the file LICENCE. If not see
 <http://www.gnu.org/licenses/>.
 */
 
-#include <future>
 #include <sstream>
 #include <string>
+#include <thread>
 
 #include "Hardware/Virtual.h"
 #include "Manager.h"
@@ -55,7 +55,7 @@ namespace Hardware
 	}
 
 	// set loco function
-	void Virtual::LocoFunction(const Protocol protocol,
+	void Virtual::LocoFunctionState(const Protocol protocol,
 		const Address address,
 		const DataModel::LocoFunctionNr function,
 		const DataModel::LocoFunctionState on)
@@ -105,7 +105,8 @@ namespace Hardware
 			default:
 				return;
 		}
-		__attribute__((unused)) auto r = std::async(std::launch::async, Manager::ProgramDccValueStatic, manager, cv, cv & 0xFF);
+		std::thread t(Manager::ProgramDccValueStatic, manager, cv, cv & 0xFF);
+		t.detach();
 	}
 
 	// write DCC CV value

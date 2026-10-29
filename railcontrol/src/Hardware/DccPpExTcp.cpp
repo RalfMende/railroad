@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -29,7 +29,7 @@ namespace Hardware
 	:	DccPpEx(params,
 			"DCC-EX TCP / " + params->GetName() + " at IP " + params->GetArg1(),
 			params->GetName()),
-	 	connection(Network::TcpClient::GetTcpClientConnection(logger, params->GetArg1(), Port))
+		connection(Network::TcpClient::GetTcpClientConnection(logger, params->GetArg1(), Port))
 	{
 		logger->Info(Languages::TextStarting, GetFullName());
 

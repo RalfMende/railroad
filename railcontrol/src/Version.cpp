@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -22,13 +22,13 @@ along with RailControl; see the file LICENCE. If not see
 
 const std::string& GetVersionInfoGitHash()
 {
-	static const std::string gitHash = "b6e12dde577fb5d52470f678973eeba4fd1fc7d3";
+	static const std::string gitHash = "a61889142009eafc3f75fc72fa87f73f972c07b5";
 	return gitHash;
 }
 
 time_t GetVersionInfoGitTimestamp()
 {
-	return 1767951685;
+	return 1773568356;
 }
 
 unsigned int GetVersionInfoGitDirty()
@@ -38,7 +38,7 @@ unsigned int GetVersionInfoGitDirty()
 
 time_t GetVersionInfoCompileTimestamp()
 {
-	return 1768047606;
+	return 1773829991;
 }
 
 const std::string& GetVersionInfoRailControlVersion()
@@ -47,3 +47,34 @@ const std::string& GetVersionInfoRailControlVersion()
 	return railControlVersion;
 }
 
+const std::string& GetOS()
+{
+#if defined(__CYGWIN__)
+	static const std::string os = "Cygwin";
+#elif defined(_WIN64) or defined(_WIN32)
+	static const std::string os = "Windows";
+#elif defined(__android__)
+	static const std::string os = "Android";
+#elif defined(__linux__) or defined(__gnu_linux__)
+	static const std::string os = "Linux";
+#elif defined(macintosh)
+	static const std::string os = "Mac OS";
+#elif defined(__APPLE) and defined(__MACH__)
+	static const std::string os = "Mac OS X";
+#else
+	static const std::string os = "Unknown OS";
+#endif
+	return os;
+}
+
+const std::string& GetCompiler()
+{
+#if defined(__clang__)
+	static const std::string compiler = "clang";
+#elif defined(__GNUC__)
+	static const std::string compiler = "GCC";
+#else
+	static const std::string compiler = "Unknown Compiler";
+#endif
+	return compiler;
+}

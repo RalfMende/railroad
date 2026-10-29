@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -86,27 +86,51 @@ namespace Hardware
 			void Booster(const ControlType controlType, BoosterState status) override;
 			Hardware::Capabilities GetCapabilities() const override;
 
+			void LocoBaseSpeed(const ControlType controlType,
+				const ControlID controlID,
+				const LocoID locoID,
+				const LocoType locoType,
+				const Protocol protocol,
+				const Address address,
+				const Address serverAddress,
+				const std::string& name,
+				const Speed speed) override;
+
 			void LocoBaseOrientation(const ControlType controlType,
-				const DataModel::LocoBase* loco,
+				const ControlID controlID,
+				const LocoID locoID,
+				const LocoType locoType,
+				const Protocol protocol,
+				const Address address,
+				const Address serverAddress,
+				const std::string& name,
 				const Orientation orientation) override;
 
-			void LocoBaseFunction(const ControlType controlType,
-				const DataModel::LocoBase* loco,
+			void LocoBaseFunctionState(const ControlType controlType,
+				const ControlID controlID,
+				const LocoID locoID,
+				const LocoType locoType,
+				const Protocol protocol,
+				const Address address,
+				const Address serverAddress,
+				const std::string& name,
 				const DataModel::LocoFunctionNr function,
-				const DataModel::LocoFunctionState on) override;
+				const DataModel::LocoFunctionState state) override;
+
+			void LocoBaseSpeedOrientationFunctionStates(const ControlID controlID,
+				const LocoID locoID,
+				const LocoType locoType,
+				const Protocol protocol,
+				const Address address,
+				const Address serverAddress,
+				const std::string& name,
+				const Speed speed,
+				const Orientation orientation,
+				const std::vector<DataModel::LocoFunctionEntry>& functions) override;
 
 			void LocoProtocols(std::vector<Protocol>& protocols) const override;
 
 			bool LocoProtocolSupported(Protocol protocol) const override;
-
-			void LocoBaseSpeed(const ControlType controlType,
-				const DataModel::LocoBase* loco,
-				const Speed speed) override;
-
-			void LocoBaseSpeedOrientationFunctions(const DataModel::LocoBase* loco,
-				const Speed speed,
-				const Orientation orientation,
-				std::vector<DataModel::LocoFunctionEntry>& functions) override;
 
 			void LocoSettings(const LocoID locoId,
 				const std::string& name,
@@ -118,6 +142,7 @@ namespace Hardware
 
 			void AccessorySettings(const AccessoryID accessoryId,
 				const std::string& name,
+				const DataModel::LayoutItem::LayoutPosition posz,
 				const std::string& matchKey) override;
 
 			void AccessoryDelete(const AccessoryID accessoryId,
@@ -126,6 +151,7 @@ namespace Hardware
 
 			void SwitchSettings(const SwitchID switchId,
 				const std::string& name,
+				const DataModel::LayoutItem::LayoutPosition posz,
 				const std::string& matchKey) override;
 
 			void SwitchDelete(const SwitchID switchId,
@@ -136,6 +162,7 @@ namespace Hardware
 
 			void SignalSettings(const SignalID signalId,
 				const std::string& name,
+				const DataModel::LayoutItem::LayoutPosition posz,
 				const std::string& matchKey) override;
 
 			void SignalDelete(const SignalID signalId,
@@ -150,7 +177,9 @@ namespace Hardware
 			void FeedbackDelete(const FeedbackID feedbackID, const std::string& name) override;
 
 			// FIXME: matchKey is missing
-			void FeedbackSettings(const FeedbackID feedbackID, const std::string& name) override;
+			void FeedbackSettings(const FeedbackID feedbackID,
+				const std::string& name,
+				const DataModel::LayoutItem::LayoutPosition posz) override;
 
 			void AddUnmatchedLocos(std::map<std::string,DataModel::LocoConfig>& list) const override;
 			std::map<std::string,DataModel::LocoConfig> GetUnmatchedLocos(const std::string& matchKey) const override;
@@ -199,6 +228,7 @@ namespace Hardware
 				const DataModel::AccessoryState state,
 				const DataModel::AccessoryPulseDuration duration)
 			{
+				Utils::Utils::SetThreadName("AccessoryBaseStateStatic");
 				Utils::Utils::SleepForMilliseconds(duration);
 				instance->Accessory(protocol, address, state, false, 0);
 			}

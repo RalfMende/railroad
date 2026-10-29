@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -69,6 +69,7 @@ const char* Languages::languages[MaxTexts][MaxLanguages] =
 /* TextAddress */ { "Address", "Adresse", "Dirección" },
 /* TextAddressMustBeHigherThen0 */ { "Address must be higher then 0", "Adresse muss grösser sein als 0", "Dirección tiene que ser mas que 0" },
 /* TextAddresses */ { "Addresses", "Adressen", "Direcciónes" },
+/* TextAllLocosInManualMode */ { "All locos are in manual mode now", "Alle Lokomotiven sind nun im Modus manuell", "Todas las locomotoras están en modo manual" },
 /* TextAllTrains */ { "all trains", "alle Züge", "todos los trenes" },
 /* TextAllowLocoTurn */ { "Allow turn locomotive orientation", "Fahrtrichtung der Lokomotive drehen erlauben", "Permitir girar la dirección de viaje" },
 /* TextAllowedPropulsions */ { "Allowed propulsions", "Erlaubte Antriebe", "Tipos de propulsiones permitios" },
@@ -81,6 +82,7 @@ const char* Languages::languages[MaxTexts][MaxLanguages] =
 /* TextAtUnlock */ { "At unlock", "Beim Auflösen", "Durante liberar" },
 /* TextAutomaticallyAddUnknownFeedbacks */ { "Automatically add unknown feedbacks", "Füge unbekannte Rückmelder automatisch hinzu", "Añadir retroseñales desconocidos automaticamente" },
 /* TextAutomode */ { "Automode", "Automode", "Autómodo" },
+/* TextBacktraceLine */ { "{0}: {1}", "{0}: {1}", "{0}: {1}" },
 /* TextBaseAddress */ { "Baseaddress", "Basisadresse", "Dirección basica" },
 /* TextBasic */ { "Basic data", "Basisdaten", "Datos básicos" },
 /* TextBlockTrack */ { "Block track", "Blockiere Gleis", "Bloquear vía" },
@@ -113,6 +115,7 @@ const char* Languages::languages[MaxTexts][MaxLanguages] =
 /* TextClusters */ { "Track clusters", "Gleisgruppen", "Grupos de vías" },
 /* TextCommandUnknown */ { "Command {0} unknown", "Kommando {0} nicht bekannt", "Comando {0} desconocido" },
 /* TextCompileDate */ { "Compile date: {0}", "Kompilierdatum: 01}", "Fetcha compilada: {0}" },
+/* TextCompiler */ { "Compiler: {0}", "Compiler: {0}", "Compilador: {0}" },
 /* TextConditions */ { "Conditions", "Bedingungen", "Condiciones" },
 /* TextConditionsNotFulfilled */ { "Conditions for route not fulfilled", "Bedingungen der Fahrstrasse nicht erfüllt", "Condiciones del itinerario no cumplidas" },
 /* TextConfigFileNotFound */ { "Config file {0} not found. Using default config file {1}.", "Konfigurationsdatei {0} nicht gefunden. Verwende Vorlage {1}.", "Archivo de configuración {0} no encontrado. Se utilizará el archivo de configuración predeterminado {1}." },
@@ -527,6 +530,7 @@ const char* Languages::languages[MaxTexts][MaxLanguages] =
 /* TextOnPush */ { "on push", "beim Drücken", "al presionar" },
 /* TextOpeningSQLite */ { "Opening SQLite database with filename {0}", "Öffne SQLite Datenbank mit Dateiname {0}", "Abriendo base de datos SQLite con nombre {0}" },
 /* TextOrientation */ { "Orientation", "Ausrichtung", "Orientación" },
+/* TextOs */ { "Operating System: {0}", "Betriebssystem: {0}", "Sistema operativo: {0}" },
 /* TextOverrunAt */ { "Overrun at", "Überfahrt bei", "Pasar a" },
 /* TextParameterFoundInConfigFile */ { "Parameter found in config file: {0} = {1}", "Parameter gefunden in Konfigurationsdate: {0} = {1}", "Parametro encontrado en fila de configuración: {0} = {1}" },
 /* TextPause */ { "Pause", "Pause", "Pausa" },
@@ -664,6 +668,8 @@ const char* Languages::languages[MaxTexts][MaxLanguages] =
 /* TextShutdownRailControl */ { "Shutting down RailControl", "Beende RailControl", "Apagando RailControl" },
 /* TextShutdownRequestedBySignal */ { "Shutting down RailControl requested by signal {0}", "Beenden von RailControl angefordert mit Signal {0}", "Apagar RailControl pedido con señal {0}" },
 /* TextShutdownRequestedByWebClient */ { "Shutting down RailControl requested by webclient", "Beenden von RailControl angefordert von Webclient", "Apagar RailControl pedido del webclient" },
+/* TextSigSegvReceived */ { "SIGSEGV received at address 0x{0}. Exiting without cleanup.", "SIGSEGV empfangen an Adresse 0x{0}. Beende ohne Aufräumen.", "SIGSEGV recibido en dirección 0x{0}. Terminando sin limpiar." },
+/* TextSigSegvReceivedWithBacktrace */ { "SIGSEGV received at address 0x{0}. Exiting without cleanup. Backtrace:", "SIGSEGV empfangen an Adresse 0x{0}. Beende ohne Aufräumen. Backtrace:", "SIGSEGV recibido en dirección 0x{0}. Terminando sin limpiar. Backtrace:" },
 /* TextSignal*/ { "signal ", "Signal", "señal" },
 /* TextSignalDeleted */ { "Signal {0} deleted", "Signal {0} gelöscht", "Señal {0} eliminado" },
 /* TextSignalDoesNotExist */ { "Signal does not exist", "Signal existiert nicht", "Señal no existe" },

@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -94,7 +94,7 @@ namespace Hardware
 			SendLocoOrientationF0F4(slot, orientationF0F4);
 		}
 
-		void LocoNet::LocoFunction(__attribute__((unused)) const Protocol protocol,
+		void LocoNet::LocoFunctionState(__attribute__((unused)) const Protocol protocol,
 			const Address address,
 			const DataModel::LocoFunctionNr function,
 			const DataModel::LocoFunctionState on)
@@ -281,7 +281,7 @@ namespace Hardware
 		}
 
 		/**
- 	 	 * Reverse Engineered with a KM1 System control 7, but it does not work properly.
+		 * Reverse Engineered with a KM1 System control 7, but it does not work properly.
 		void LocoNet::ProgramMain(const Address address,
 			const CvNumber cv,
 			const CvValue value)

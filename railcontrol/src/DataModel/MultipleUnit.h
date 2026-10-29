@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -19,6 +19,8 @@ along with RailControl; see the file LICENCE. If not see
 */
 
 #pragma once
+
+#include <string>
 
 #include "DataTypes.h"
 #include "DataModel/LocoBase.h"
@@ -59,6 +61,11 @@ namespace DataModel
 			std::string Serialize() const override;
 
 			void Deserialize(const std::string& serialized) override;
+
+			inline LocoType GetLocoType() const override
+			{
+				return LocoTypeMultipleUnit;
+			}
 
 			void CalculatePropulsion();
 

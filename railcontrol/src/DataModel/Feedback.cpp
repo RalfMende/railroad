@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -86,7 +86,7 @@ namespace DataModel
 	void Feedback::SetState(Logger::Logger* logger,
 		const FeedbackState newState)
 	{
-		FeedbackState state = static_cast<FeedbackState>(newState != inverted);
+		const FeedbackState state = static_cast<FeedbackState>(newState != inverted);
 		{
 			std::lock_guard<std::mutex> Guard(updateMutex);
 			if (state == FeedbackStateFree)
@@ -114,8 +114,17 @@ namespace DataModel
 		Route* route = manager->GetRoute(routeId);
 		if (route)
 		{
-			route->Execute(logger, (track ? track->GetLocoBase() : ObjectIdentifier()));
+			std::thread t(ExecuteRouteStatic, route, logger, (track ? track->GetLocoBase() : ObjectIdentifier()));
+			t.detach();
 		}
+	}
+
+	void Feedback::ExecuteRouteStatic(Route* route,
+		Logger::Logger* logger,
+		const ObjectIdentifier objectIdentifier)
+	{
+		Utils::Utils::SetThreadName("ExecuteRouteStatic");
+		route->Execute(logger, objectIdentifier);
 	}
 
 	void Feedback::UpdateTrackState(const FeedbackState state)

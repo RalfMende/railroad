@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -19,6 +19,7 @@ along with RailControl; see the file LICENCE. If not see
 */
 
 #include "DataModel/LocoBase.h"
+#include "DataModel/LocoConfig.h"
 #include "DataModel/LocoFunctions.h"
 #include "Manager.h"
 #include "Server/Z21/Z21Client.h"
@@ -27,8 +28,10 @@ along with RailControl; see the file LICENCE. If not see
 
 using DataModel::Loco;
 using DataModel::LocoBase;
+using DataModel::LocoConfig;
 using DataModel::LocoFunctionNr;
 using DataModel::LocoFunctionState;
+using Hardware::Protocols::Z21LocoCacheEntry;
 
 namespace Network
 {
@@ -66,7 +69,7 @@ namespace Server { namespace Z21
 	Network::UdpClient* Z21Server::UdpClientFactory(const int serverSocket,
 		const struct sockaddr_storage* clientAddress)
 	{
-		return reinterpret_cast<Network::UdpClient*>(new Z21Client(++lastClientID, manager, serverSocket, clientAddress));
+		return reinterpret_cast<Network::UdpClient*>(new Z21Client(++lastClientID, manager, *this, serverSocket, clientAddress));
 	}
 
 	void Z21Server::Booster(__attribute__((unused)) const ControlType controlType,
@@ -89,45 +92,76 @@ namespace Server { namespace Z21
 	}
 
 	void Z21Server::LocoBaseSpeed(__attribute__((unused)) const ControlType controlType,
-		const LocoBase* locoBase,
-		__attribute__((unused)) const Speed speed)
+		__attribute__((unused)) const ControlID controlID,
+		__attribute__((unused)) const LocoID locoID,
+		__attribute__((unused)) const LocoType locoType,
+		__attribute__((unused)) const Protocol protocol,
+		__attribute__((unused)) const Address address,
+		const Address serverAddress,
+		__attribute__((unused)) const std::string& name,
+		const Speed speed)
 	{
-		if (nullptr == locoBase)
-		{
-			return;
-		}
-		for (auto client : clients)
-		{
-			reinterpret_cast<Z21Client*>(client)->SendLocoInfo(locoBase);
-		}
+		locoCache.SetSpeed(serverAddress, speed);
+		SendLocoInfo(locoCache.GetData(serverAddress), serverAddress);
 	}
 
 	void Z21Server::LocoBaseOrientation(__attribute__((unused)) const ControlType controlType,
-		const LocoBase* locoBase,
-		__attribute__((unused)) const Orientation orientation)
+		__attribute__((unused)) const ControlID controlID,
+		__attribute__((unused)) const LocoID locoID,
+		__attribute__((unused)) const LocoType locoType,
+		__attribute__((unused)) const Protocol protocol,
+		__attribute__((unused)) const Address address,
+		const Address serverAddress,
+		__attribute__((unused)) const std::string& name,
+		const Orientation orientation)
 	{
-		if (nullptr == locoBase)
-		{
-			return;
-		}
-		for (auto client : clients)
-		{
-			reinterpret_cast<Z21Client*>(client)->SendLocoInfo(locoBase);
-		}
+		locoCache.SetOrientation(serverAddress, orientation);
+		SendLocoInfo(locoCache.GetData(serverAddress), serverAddress);
 	}
 
-	void Z21Server::LocoBaseFunction(__attribute__((unused)) const ControlType controlType,
-		const LocoBase* locoBase,
-		__attribute__((unused)) const LocoFunctionNr function,
-		__attribute__((unused)) const LocoFunctionState state)
+	void Z21Server::LocoBaseFunctionState(__attribute__((unused)) const ControlType controlType,
+		__attribute__((unused)) const ControlID controlID,
+		__attribute__((unused)) const LocoID locoID,
+		__attribute__((unused)) const LocoType locoType,
+		__attribute__((unused)) const Protocol protocol,
+		__attribute__((unused)) const Address address,
+		const Address serverAddress,
+		__attribute__((unused)) const std::string& name,
+		const DataModel::LocoFunctionNr function,
+		const DataModel::LocoFunctionState state)
 	{
-		if (!locoBase)
+		locoCache.SetFunction(serverAddress, function, state != DataModel::LocoFunctionStateOff);
+		SendLocoInfo(locoCache.GetData(serverAddress), serverAddress);
+	}
+
+	void Z21Server::LocoBaseSpeedOrientationFunctionStates(__attribute__((unused)) const ControlID controlID,
+		__attribute__((unused)) const LocoID locoID,
+		__attribute__((unused)) const LocoType locoType,
+		__attribute__((unused)) const Protocol protocol,
+		__attribute__((unused)) const Address address,
+		const Address serverAddress,
+		__attribute__((unused)) const std::string& name,
+		const Speed speed,
+		const Orientation orientation,
+		const std::vector<DataModel::LocoFunctionEntry>& functions)
+	{
+		locoCache.SetSpeed(serverAddress, speed);
+		locoCache.SetOrientation(serverAddress, orientation);
+
+		for (auto& function : functions)
 		{
-			return;
+			locoCache.SetFunction(serverAddress, function.nr, function.state != DataModel::LocoFunctionStateOff);
 		}
+		SendLocoInfo(locoCache.GetData(serverAddress), serverAddress);
+	}
+
+
+	void Z21Server::SendLocoInfo(const Z21LocoCacheEntry& locoCache,
+		const Address serverAddress)
+	{
 		for (auto client : clients)
 		{
-			reinterpret_cast<Z21Client*>(client)->SendLocoInfo(locoBase);
+			reinterpret_cast<Z21Client*>(client)->SendLocoInfo(locoCache, serverAddress);
 		}
 	}
 

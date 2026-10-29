@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -23,6 +23,7 @@ along with RailControl; see the file LICENCE. If not see
 #include <ctime>
 
 #include "Hardware/Protocols/Z21DataTypes.h"
+#include "Hardware/Protocols/Z21LocoCache.h"
 #include "Network/UdpClient.h"
 #include "Utils/Integer.h"
 
@@ -41,6 +42,7 @@ namespace Server { namespace Z21
 
 			Z21Client(const unsigned int id,
 				Manager& manager,
+				Z21Server& z21Server,
 				const int serverSocket,
 				const struct sockaddr_storage* clientAddress);
 
@@ -78,7 +80,8 @@ namespace Server { namespace Z21
 				Send(sendBuffer, sizeof(sendBuffer));
 			}
 
-			void SendLocoInfo(const DataModel::LocoBase* const locoBase);
+			void SendLocoInfo(const Hardware::Protocols::Z21LocoCacheEntry& locoCache,
+				const Address serverAddress);
 
 			void SendTurnoutInfo(const DataModel::AccessoryBase* const accessoryBase);
 
@@ -175,6 +178,7 @@ namespace Server { namespace Z21
 			Logger::Logger* logger;
 
 			Manager& manager;
+			Z21Server& z21Server;
 			Z21Enums::BroadCastFlags broadCastFlags;
 	};
 }} // namespace Server::Z21

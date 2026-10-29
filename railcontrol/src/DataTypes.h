@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -186,7 +186,8 @@ enum AddressPort : uint8_t
 
 enum LocoType : uint8_t
 {
-	LocoTypeLoco = 0,
+	LocoTypeNone = 0,
+	LocoTypeLoco,
 	LocoTypeMultipleUnit
 };
 
@@ -320,7 +321,7 @@ enum TrainType : uint32_t
 	TrainTypeHistoric                  = 0x00001000,
 	TrainTypeExtra                     = 0x00002000,
 
- 	TrainTypePassengerWithCargo        = 0x00008000,
+	TrainTypePassengerWithCargo        = 0x00008000,
 
 	TrainTypePassenger                 = TrainTypeInternationalHighSpeed
 											| TrainTypeNationalHighSpeed
@@ -345,12 +346,12 @@ enum TrainType : uint32_t
 
 	TrainTypeCargoWithPassenger        = 0x00800000,
 
- 	TrainTypeCargo                     = TrainTypeCargoLongDistance
- 											| TrainTypeCargoLocal
- 											| TrainTypeCargoBlock
- 											| TrainTypeCargoTractor
- 											| TrainTypeCargoExpress
- 											| TrainTypeCargoWithPassenger,
+	TrainTypeCargo                     = TrainTypeCargoLongDistance
+											| TrainTypeCargoLocal
+											| TrainTypeCargoBlock
+											| TrainTypeCargoTractor
+											| TrainTypeCargoExpress
+											| TrainTypeCargoWithPassenger,
 
 	TrainTypeRescue                    = 0x01000000,
 	TrainTypeConstruction              = 0x02000000,

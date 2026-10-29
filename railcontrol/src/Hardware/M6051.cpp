@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -35,7 +35,7 @@ namespace Hardware
 			params->GetControlID(),
 			"Maerklin Interface (6050/6051) / " + params->GetName() + " at serial port " + params->GetArg1(),
 			params->GetName()),
-	 	serialLine(logger, params->GetArg1(), B2400, 8, 'N', 2),
+		serialLine(logger, params->GetArg1(), B2400, 8, 'N', 2),
 		run(true)
 	{
 		logger->Info(Languages::TextStarting, GetFullName());
@@ -106,7 +106,7 @@ namespace Hardware
 		SendTwoBytes(speedMM, addressMM);
 	}
 
-	void M6051::LocoFunction(__attribute__((unused)) const Protocol protocol,
+	void M6051::LocoFunctionState(__attribute__((unused)) const Protocol protocol,
 		const Address address,
 		const DataModel::LocoFunctionNr function,
 		const DataModel::LocoFunctionState on)

@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -34,6 +34,7 @@ class Manager;
 
 namespace DataModel
 {
+	class Route;
 	class Track;
 
 	enum FeedbackType : unsigned char
@@ -55,15 +56,15 @@ namespace DataModel
 			inline Feedback(Manager* manager,
 				const FeedbackID feedbackID)
 			:	LayoutItem(feedbackID),
-			 	controlID(ControlIdNone),
-			 	pin(FeedbackPinNone),
+				controlID(ControlIdNone),
+				pin(FeedbackPinNone),
 				device(FeedbackDeviceNone),
 				bus(FeedbackBusNone),
-			 	manager(manager),
-			 	feedbackType(FeedbackTypeDefault),
-			 	routeId(RouteNone),
-			 	inverted(false),
-			 	track(nullptr),
+				manager(manager),
+				feedbackType(FeedbackTypeDefault),
+				routeId(RouteNone),
+				inverted(false),
+				track(nullptr),
 				stateCounter(0)
 			{
 			}
@@ -221,6 +222,10 @@ namespace DataModel
 
 		private:
 			void UpdateTrackState(const FeedbackState state);
+
+			static void ExecuteRouteStatic(DataModel::Route* route,
+				Logger::Logger* logger,
+				const DataModel::ObjectIdentifier objectIdentifier);
 
 			ControlID controlID;
 			FeedbackPin pin;

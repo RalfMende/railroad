@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -61,8 +61,8 @@ namespace DataModel
 
 			Route(Manager* manager, const RouteID routeID)
 			:	LayoutItem(routeID),
-			 	LockableItem(),
-			 	manager(manager),
+				LockableItem(),
+				manager(manager),
 				executeAtUnlock(false),
 				delay(0),
 				pushpull(PushpullTypeBoth),
@@ -162,6 +162,7 @@ namespace DataModel
 
 			inline static bool ExecuteStatic(Logger::Logger* logger, Route* route)
 			{
+				Utils::Utils::SetThreadName("ExecuteStatic");
 				return route->Execute(logger, ObjectIdentifier());
 			}
 

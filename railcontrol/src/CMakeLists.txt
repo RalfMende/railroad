@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.10)
 
 if(EXISTS "${CMAKE_SOURCE_DIR}/.git")
 	find_package(Git QUIET)
@@ -33,7 +33,7 @@ if(EXISTS "${CMAKE_SOURCE_DIR}/.git")
 		OUTPUT_STRIP_TRAILING_WHITESPACE
 	)
 else()
-	file(READ VERSION RAILCONTROL_VERSION)
+	file(READ VERSION_RAILCONTROL RAILCONTROL_VERSION)
 	string(STRIP ${RAILCONTROL_VERSION} RAILCONTROL_VERSION)
 	file(READ VERSION_GIT_HASH GIT_HASH)
 	string(STRIP ${GIT_HASH} GIT_HASH)
@@ -365,6 +365,13 @@ else()
 	target_link_libraries(${PROJECT_NAME} PRIVATE zlib)
 endif()
 
+option(USE_CPPTRACE "Build with cpptrace library" OFF)
+
+if (USE_CPPTRACE)
+	find_package(cpptrace CONFIG REQUIRED)
+	target_link_libraries(${PROJECT_NAME} PRIVATE cpptrace::cpptrace)
+endif()
+
 set(CMAKE_SHARED_LIBRARY_LINK_CXX_FLAGS "")
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
@@ -379,9 +386,16 @@ target_link_libraries(${PROJECT_NAME} PRIVATE Threads::Threads dl)
 
 target_include_directories(${PROJECT_NAME} PRIVATE ${CMAKE_SOURCE_DIR})
 
+# generate Version.cpp each time railcontrol is compiled
 configure_file(Version.cpp.in Version.cpp @ONLY)
+set(STAMP_FILE "${CMAKE_CURRENT_BINARY_DIR}/rebuild_version.stamp")
+add_custom_target(rebuild_version ALL COMMAND ${CMAKE_COMMAND} -E touch "${STAMP_FILE}" BYPRODUCTS "${STAMP_FILE}" COMMENT "Forcing recompilation of Version.cpp")
+set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/Version.cpp" PROPERTIES OBJECT_DEPENDS "${STAMP_FILE}")
+add_dependencies(${PROJECT_NAME} rebuild_version)
+
 
 set(CMAKE_INSTALL_BINDIR ".")
+set(CMAKE_INSTALL_DOCDIR "doc")
 set(DATADIR ".")
 
 install(TARGETS ${PROJECT_NAME})
@@ -429,6 +443,46 @@ set(DOC_DE
 	Documentation/de/automatic.md
 )
 
+set(DOCDATA_DE
+	${PROJECT_SOURCE_DIR}/Documentation/de/config_layers_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/control_list_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/counter_basics_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/counter_position_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/cs2_config_can_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/cs2_config_ip_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/cs2_tcp_config_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/cs2_udp_config_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/feedback_basics_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/feedback_position_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/groups_basics_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/groups_tracks_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/locomotives_automode_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/locomotives_basics_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/locomotives_functions_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/multipleunits_automode_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/multipleunits_basics_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/multipleunits_functions_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/multipleunits_multipleunits_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/routes_atlock_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/routes_atunlock_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/routes_automode_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/routes_basics_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/routes_position_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/settings_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/signals_addresses_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/signals_basics_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/signals_position_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/switches_basics_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/switches_position_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/texts_basics_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/texts_position_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/tracks_automode_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/tracks_basics_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/tracks_feedbacks_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/track_signals_de.png
+	${PROJECT_SOURCE_DIR}/Documentation/de/tracks_position_de.png
+)
+
 set(DOC_EN
 	Documentation/en/index.md
 	Documentation/en/startup-arguments.md
@@ -460,6 +514,43 @@ set(DOC_EN
 	Documentation/en/config-texts.md
 	Documentation/en/config-counter.md
 	Documentation/en/automatic.md
+)
+set(DOCDATA_EN
+	${PROJECT_SOURCE_DIR}/Documentation/en/config_layers_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/control_list_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/counter_basics_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/counter_position_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/cs2_tcp_config_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/cs2_udp_config_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/feedback_basics_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/feedback_position_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/groups_basics_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/groups_tracks_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/locomotives_automode_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/locomotives_basics_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/locomotives_functions_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/multipleunits_automode_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/multipleunits_basics_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/multipleunits_functions_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/multipleunits_multipleunits_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/routes_atlock_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/routes_atunlock_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/routes_automode_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/routes_basics_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/routes_position_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/settings_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/signals_addresses_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/signals_basics_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/signals_position_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/switches_basics_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/switches_position_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/texts_basics_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/texts_position_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/tracks_automode_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/tracks_basics_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/tracks_feedbacks_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/track_signals_en.png
+	${PROJECT_SOURCE_DIR}/Documentation/en/tracks_position_en.png
 )
 
 set(DOC_ES
@@ -494,240 +585,226 @@ set(DOC_ES
 	Documentation/es/config-counter.md
 	Documentation/es/automatic.md
 )
-
-set(OUTPUT_HTML_DE ${CMAKE_BINARY_DIR}/doc/de/index.html)
-set(OUTPUT_HTML_EN ${CMAKE_BINARY_DIR}/doc/en/index.html)
-set(OUTPUT_HTML_ES ${CMAKE_BINARY_DIR}/doc/es/index.html)
-
-file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/doc/de)
-file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/doc/en)
-file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/doc/es)
-
-add_custom_command(
-    OUTPUT ${OUTPUT_HTML_DE}
-    COMMAND pandoc --toc --toc-depth=2 --standalone --css=../style.css
-                   --template=Documentation/template.html
-                   --metadata-file=Documentation/de/metadata.yaml ${DOC_DE}
-                   --output=${OUTPUT_HTML_DE}
-    DEPENDS ${DOC_DE}
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    COMMENT "Generating German HTML documentation"
-    VERBATIM
-)
-
-add_custom_command(
-    OUTPUT ${OUTPUT_HTML_EN}
-    COMMAND pandoc --toc --toc-depth=2 --standalone --css=../style.css
-                   --template=Documentation/template.html
-                   --metadata-file=Documentation/en/metadata.yaml ${DOC_EN}
-                   --output=${OUTPUT_HTML_EN}
-    DEPENDS ${DOC_EN}
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    COMMENT "Generating English HTML documentation"
-    VERBATIM
-)
-
-add_custom_command(
-    OUTPUT ${OUTPUT_HTML_ES}
-    COMMAND pandoc --toc --toc-depth=2 --standalone --css=../style.css
-                   --template=Documentation/template.html
-                   --metadata-file=Documentation/es/metadata.yaml ${DOC_ES}
-                   --output=${OUTPUT_HTML_ES}
-    DEPENDS ${DOC_ES}
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    COMMENT "Generating Spanish HTML documentation"
-    VERBATIM
+set(DOCDATA_ES
+	${PROJECT_SOURCE_DIR}/Documentation/es/config_layers_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/control_list_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/cs2_tcp_config_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/cs2_udp_config_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/feedback_basics_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/feedback_position_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/groups_basics_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/groups_tracks_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/locomotives_automode_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/locomotives_basics_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/locomotives_functions_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/multipleunits_automode_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/multipleunits_basics_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/multipleunits_functions_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/multipleunits_multipleunits_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/routes_atlock_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/routes_atunlock_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/routes_automode_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/routes_basics_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/routes_position_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/settings_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/signals_addresses_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/signals_basics_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/signals_position_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/switches_basics_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/switches_position_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/texts_basics_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/texts_position_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/tracks_automode_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/tracks_basics_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/tracks_feedbacks_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/track_signals_es.png
+	${PROJECT_SOURCE_DIR}/Documentation/es/tracks_position_es.png
 )
 
 set(DOCDATA
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_accessory.png
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_booster.png
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_control.png
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_counter.png
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_feedback.png
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_fullscreen.png
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_group.png
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_layer.png
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_loco.png
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_menu.png
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_multipleunit.png
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_program.png
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_quit.png
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_route.png
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_settings.png
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_signalgreen.png
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_signal.png
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_signalred.png
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_stop.png
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_street.png
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_switch.png
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_text.png
-    ${PROJECT_SOURCE_DIR}/Documentation/menu_track.png
-    ${PROJECT_SOURCE_DIR}/Documentation/style.css
+	${PROJECT_SOURCE_DIR}/Documentation/menu_accessory.png
+	${PROJECT_SOURCE_DIR}/Documentation/menu_booster.png
+	${PROJECT_SOURCE_DIR}/Documentation/menu_control.png
+	${PROJECT_SOURCE_DIR}/Documentation/menu_counter.png
+	${PROJECT_SOURCE_DIR}/Documentation/menu_feedback.png
+	${PROJECT_SOURCE_DIR}/Documentation/menu_fullscreen.png
+	${PROJECT_SOURCE_DIR}/Documentation/menu_group.png
+	${PROJECT_SOURCE_DIR}/Documentation/menu_layer.png
+	${PROJECT_SOURCE_DIR}/Documentation/menu_loco.png
+	${PROJECT_SOURCE_DIR}/Documentation/menu_menu.png
+	${PROJECT_SOURCE_DIR}/Documentation/menu_multipleunit.png
+	${PROJECT_SOURCE_DIR}/Documentation/menu_program.png
+	${PROJECT_SOURCE_DIR}/Documentation/menu_quit.png
+	${PROJECT_SOURCE_DIR}/Documentation/menu_route.png
+	${PROJECT_SOURCE_DIR}/Documentation/menu_settings.png
+	${PROJECT_SOURCE_DIR}/Documentation/menu_signalgreen.png
+	${PROJECT_SOURCE_DIR}/Documentation/menu_signal.png
+	${PROJECT_SOURCE_DIR}/Documentation/menu_signalred.png
+	${PROJECT_SOURCE_DIR}/Documentation/menu_stop.png
+	${PROJECT_SOURCE_DIR}/Documentation/menu_street.png
+	${PROJECT_SOURCE_DIR}/Documentation/menu_switch.png
+	${PROJECT_SOURCE_DIR}/Documentation/menu_text.png
+	${PROJECT_SOURCE_DIR}/Documentation/menu_track.png
+	${PROJECT_SOURCE_DIR}/Documentation/style.css
 )
 
-set(DOCDATA_DE
-    ${PROJECT_SOURCE_DIR}/Documentation/de/config_layers_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/control_list_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/counter_basics_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/counter_position_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/cs2_config_can_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/cs2_config_ip_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/cs2_tcp_config_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/cs2_udp_config_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/feedback_basics_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/feedback_position_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/groups_basics_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/groups_tracks_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/locomotives_automode_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/locomotives_basics_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/locomotives_functions_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/multipleunits_automode_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/multipleunits_basics_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/multipleunits_functions_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/multipleunits_multipleunits_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/routes_atlock_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/routes_atunlock_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/routes_automode_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/routes_basics_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/routes_position_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/settings_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/signals_addresses_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/signals_basics_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/signals_position_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/switches_basics_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/switches_position_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/texts_basics_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/texts_position_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/tracks_automode_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/tracks_basics_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/tracks_feedbacks_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/track_signals_de.png
-    ${PROJECT_SOURCE_DIR}/Documentation/de/tracks_position_de.png
+set(OUTPUT_HTML ${CMAKE_BINARY_DIR}/doc)
+set(OUTPUT_HTML_DE ${OUTPUT_HTML}/de)
+set(OUTPUT_HTML_DE_INDEX ${OUTPUT_HTML_DE}/index.html)
+set(OUTPUT_HTML_EN ${OUTPUT_HTML}/en)
+set(OUTPUT_HTML_EN_INDEX ${OUTPUT_HTML_EN}/index.html)
+set(OUTPUT_HTML_ES ${OUTPUT_HTML}/es)
+set(OUTPUT_HTML_ES_INDEX ${OUTPUT_HTML_ES}/index.html)
+
+file(MAKE_DIRECTORY ${OUTPUT_HTML_DE})
+file(MAKE_DIRECTORY ${OUTPUT_HTML_EN})
+file(MAKE_DIRECTORY ${OUTPUT_HTML_ES})
+
+set(PANDOC_OPTS --toc --toc-depth=2
+	--standalone
+	--css=../style.css
+	--template=Documentation/template.html)
+
+add_custom_command(
+	OUTPUT ${OUTPUT_HTML_DE_INDEX}
+	COMMAND ${PANDOC_EXECUTABLE} ${PANDOC_OPTS}
+		--metadata-file=Documentation/de/metadata.yaml
+		--output=${OUTPUT_HTML_DE_INDEX} ${DOC_DE}
+	DEPENDS ${DOC_DE} ${OUTPUT_HTML_DE}
+	WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+	COMMENT "Generating German HTML documentation"
+	VERBATIM
 )
 
-set(DOCDATA_EN
-    ${PROJECT_SOURCE_DIR}/Documentation/en/config_layers_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/control_list_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/counter_basics_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/counter_position_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/cs2_tcp_config_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/cs2_udp_config_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/feedback_basics_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/feedback_position_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/groups_basics_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/groups_tracks_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/locomotives_automode_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/locomotives_basics_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/locomotives_functions_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/multipleunits_automode_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/multipleunits_basics_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/multipleunits_functions_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/multipleunits_multipleunits_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/routes_atlock_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/routes_atunlock_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/routes_automode_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/routes_basics_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/routes_position_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/settings_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/signals_addresses_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/signals_basics_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/signals_position_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/switches_basics_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/switches_position_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/texts_basics_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/texts_position_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/tracks_automode_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/tracks_basics_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/tracks_feedbacks_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/track_signals_en.png
-    ${PROJECT_SOURCE_DIR}/Documentation/en/tracks_position_en.png
+add_custom_command(
+	OUTPUT ${OUTPUT_HTML_EN_INDEX}
+	COMMAND ${PANDOC_EXECUTABLE} ${PANDOC_OPTS}
+		--metadata-file=Documentation/en/metadata.yaml
+		--output=${OUTPUT_HTML_EN_INDEX} ${DOC_EN}
+	DEPENDS ${DOC_EN} ${OUTPUT_HTML_EN}
+	WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+	COMMENT "Generating English HTML documentation"
+	VERBATIM
 )
 
-set(DOCDATA_ES
-    ${PROJECT_SOURCE_DIR}/Documentation/es/config_layers_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/control_list_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/cs2_tcp_config_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/cs2_udp_config_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/feedback_basics_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/feedback_position_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/groups_basics_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/groups_tracks_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/locomotives_automode_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/locomotives_basics_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/locomotives_functions_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/multipleunits_automode_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/multipleunits_basics_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/multipleunits_functions_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/multipleunits_multipleunits_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/routes_atlock_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/routes_atunlock_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/routes_automode_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/routes_basics_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/routes_position_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/settings_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/signals_addresses_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/signals_basics_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/signals_position_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/switches_basics_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/switches_position_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/texts_basics_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/texts_position_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/tracks_automode_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/tracks_basics_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/tracks_feedbacks_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/track_signals_es.png
-    ${PROJECT_SOURCE_DIR}/Documentation/es/tracks_position_es.png
+add_custom_command(
+	OUTPUT ${OUTPUT_HTML_ES_INDEX}
+	COMMAND ${PANDOC_EXECUTABLE} ${PANDOC_OPTS}
+		--metadata-file=Documentation/es/metadata.yaml
+		--output=${OUTPUT_HTML_ES_INDEX} ${DOC_ES}
+	DEPENDS ${DOC_ES} ${OUTPUT_HTML_ES}
+	WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+	COMMENT "Generating Spanish HTML documentation"
+	VERBATIM
 )
 
-add_custom_target(doc
-    DEPENDS ${OUTPUT_HTML_DE} ${OUTPUT_HTML_EN} ${OUTPUT_HTML_ES}
-)
+if(PANDOC_EXECUTABLE)
+	install(DIRECTORY ${OUTPUT_HTML}/ DESTINATION ${CMAKE_INSTALL_DOCDIR})
+	add_custom_target(doc ALL
+		DEPENDS ${OUTPUT_HTML_DE_INDEX} ${OUTPUT_HTML_EN_INDEX} ${OUTPUT_HTML_ES_INDEX}
+	)
+endif()
 
-foreach(DOCDATA ${DOCDATA})
-    add_custom_command(TARGET doc POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy
-            ${DOCDATA}
-            ${PROJECT_BINARY_DIR}/doc
-    )
-endforeach()
-
-foreach(DOCDATA_DE ${DOCDATA_DE})
-    add_custom_command(TARGET doc POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy
-            ${DOCDATA_DE}
-            ${PROJECT_BINARY_DIR}/doc/de
-    )
-endforeach()
-
-foreach(DOCDATA_EN ${DOCDATA_EN})
-    add_custom_command(TARGET doc POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy
-            ${DOCDATA_EN}
-            ${PROJECT_BINARY_DIR}/doc/en
-    )
-endforeach()
-
-foreach(DOCDATA_ES ${DOCDATA_ES})
-    add_custom_command(TARGET doc POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E copy
-            ${DOCDATA_ES}
-            ${PROJECT_BINARY_DIR}/doc/es
-    )
-endforeach()
+file(COPY ${DOCDATA} DESTINATION ${OUTPUT_HTML})
+file(COPY ${DOCDATA_DE} DESTINATION ${OUTPUT_HTML_DE})
+file(COPY ${DOCDATA_EN} DESTINATION ${OUTPUT_HTML_EN})
+file(COPY ${DOCDATA_ES} DESTINATION ${OUTPUT_HTML_ES})
 
 add_custom_target(doc-for-web
-    DEPENDS doc
+	DEPENDS doc
 )
 
 add_custom_command(TARGET doc-for-web POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-            ${PROJECT_SOURCE_DIR}/Documentation/de/documentation-de
-            ${PROJECT_BINARY_DIR}/doc/de/documentation-de
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-            ${PROJECT_SOURCE_DIR}/Documentation/en/documentation-en
-            ${PROJECT_BINARY_DIR}/doc/en/documentation-en
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-            ${PROJECT_SOURCE_DIR}/Documentation/es/documentation-es
-            ${PROJECT_BINARY_DIR}/doc/es/documentation-es
+	COMMAND ${CMAKE_COMMAND} -E copy_directory
+		${PROJECT_SOURCE_DIR}/Documentation/de/documentation-de
+		${PROJECT_BINARY_DIR}/doc/de/documentation-de
+	COMMAND ${CMAKE_COMMAND} -E copy_directory
+		${PROJECT_SOURCE_DIR}/Documentation/en/documentation-en
+		${PROJECT_BINARY_DIR}/doc/en/documentation-en
+	COMMAND ${CMAKE_COMMAND} -E copy_directory
+		${PROJECT_SOURCE_DIR}/Documentation/es/documentation-es
+		${PROJECT_BINARY_DIR}/doc/es/documentation-es
 )
+
+# Build documentation as small HTML files ("chunked html")
+set(OUTPUT_CHUNKEDHTML_DE ${CMAKE_BINARY_DIR}/chunkedhtml/de)
+set(OUTPUT_CHUNKEDHTML_EN ${CMAKE_BINARY_DIR}/chunkedhtml/en)
+set(OUTPUT_CHUNKEDHTML_ES ${CMAKE_BINARY_DIR}/chunkedhtml/es)
+file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/chunkedhtml)
+
+set(PANDOC_CHUNKEDOPTS --toc --toc-depth=2
+	--standalone
+	--css=../style.css
+	--template=Documentation/template.html
+	--write=chunkedhtml
+	--embed-resources
+	--split-level=1
+)
+
+add_custom_command(
+	OUTPUT ${OUTPUT_CHUNKEDHTML_DE}/index.html
+	COMMAND ${PANDOC_EXECUTABLE} ${PANDOC_CHUNKEDOPTS}
+		--resource-path=".:Documentation:Documentation/de:doc:doc/de"
+		--metadata-file=Documentation/de/metadata.yaml
+		--output=${OUTPUT_CHUNKEDHTML_DE} ${DOC_DE}
+	DEPENDS ${DOC_DE}
+	WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+	COMMENT "Generating German Chunked HTML documentation"
+	VERBATIM
+)
+
+add_custom_command(
+	OUTPUT ${OUTPUT_CHUNKEDHTML_EN}/index.html
+	COMMAND ${PANDOC_EXECUTABLE} ${PANDOC_CHUNKEDOPTS}
+		--resource-path=".:Documentation:Documentation/en:doc:doc/en"
+		--metadata-file=Documentation/en/metadata.yaml
+		--output=${OUTPUT_CHUNKEDHTML_EN} ${DOC_EN}
+	DEPENDS ${DOC_EN}
+	WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+	COMMENT "Generating English Chunked HTML documentation"
+	VERBATIM
+)
+
+add_custom_command(
+	OUTPUT ${OUTPUT_CHUNKEDHTML_ES}/index.html
+	COMMAND ${PANDOC_EXECUTABLE} ${PANDOC_CHUNKEDOPTS}
+		--resource-path="doc/en:Documentation/en:.:Documentation:Documentation/es:doc:doc/es"
+		--metadata-file=Documentation/es/metadata.yaml
+		--output=${OUTPUT_CHUNKEDHTML_ES} ${DOC_ES}
+	DEPENDS ${DOC_ES}
+	WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+	COMMENT "Generating Spanish Chunked HTML documentation"
+	VERBATIM
+)
+
+add_custom_target(chunked-doc
+	DEPENDS ${OUTPUT_CHUNKEDHTML_DE}/index.html
+		${OUTPUT_CHUNKEDHTML_EN}/index.html
+		${OUTPUT_CHUNKEDHTML_ES}/index.html
+)
+
+# Required for pandoc --write=chunkedhtml
+#
+# In that mode, pandoc is not idempotent and the target directories we want it
+# to write to, need to be gone before it is called one more time.
+# I.e., if you're working on the chunked HTML output, ideally call
+# cmake [...] --clean-first --target chunked-doc
+set_property(
+	TARGET chunked-doc
+	APPEND
+	PROPERTY ADDITIONAL_CLEAN_FILES
+		${CMAKE_BINARY_DIR}/chunkedhtml/de
+		${CMAKE_BINARY_DIR}/chunkedhtml/en
+		${CMAKE_BINARY_DIR}/chunkedhtml/es
+)
+
+foreach(DOCDATA ${DOCDATA})
+	add_custom_command(TARGET chunked-doc POST_BUILD
+		COMMAND ${CMAKE_COMMAND} -E copy
+			${DOCDATA}
+			${PROJECT_BINARY_DIR}/chunkedhtml
+	)
+endforeach()
+
+include(CTest)
+add_test(NAME pytest COMMAND pytest -vv ${CMAKE_SOURCE_DIR}/tests)

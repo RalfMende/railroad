@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -214,13 +214,15 @@ namespace Server { namespace CS2
 	}
 
 	void CS2Server::LocoBaseSpeed(__attribute__((unused)) const ControlType controlType,
-		const LocoBase* locoBase,
+		__attribute__((unused)) const ControlID controlID,
+		__attribute__((unused)) const LocoID locoID,
+		__attribute__((unused)) const LocoType locoType,
+		__attribute__((unused)) const Protocol protocol,
+		__attribute__((unused)) const Address address,
+		__attribute__((unused)) const Address serverAddress,
+		__attribute__((unused)) const std::string& name,
 		__attribute__((unused)) const Speed speed)
 	{
-		if (nullptr == locoBase)
-		{
-			return;
-		}
 //		for (auto client : clients)
 //		{
 //			reinterpret_cast<CS2Client*>(client)->SendLocoInfo(locoBase);
@@ -228,31 +230,35 @@ namespace Server { namespace CS2
 	}
 
 	void CS2Server::LocoBaseOrientation(__attribute__((unused)) const ControlType controlType,
-		const LocoBase* locoBase,
+		__attribute__((unused)) const ControlID controlID,
+		__attribute__((unused)) const LocoID locoID,
+		__attribute__((unused)) const LocoType locoType,
+		__attribute__((unused)) const Protocol protocol,
+		__attribute__((unused)) const Address address,
+		__attribute__((unused)) const Address serverAddress,
+		__attribute__((unused)) const std::string& name,
 		__attribute__((unused)) const Orientation orientation)
 	{
-		if (nullptr == locoBase)
-		{
-			return;
-		}
 //		for (auto client : clients)
 //		{
-//			reinterpret_cast<CS2Client*>(client)->SendLocoInfo(locoBase);
+//			reinterpret_cast<CS2Client*>(client)->SendLocoInfo(locoConfig);
 //		}
 	}
 
-	void CS2Server::LocoBaseFunction(__attribute__((unused)) const ControlType controlType,
-		const LocoBase* locoBase,
+	void CS2Server::LocoBaseFunctionState(__attribute__((unused)) const ControlType controlType,
+		__attribute__((unused)) const ControlID controlID,
+		__attribute__((unused)) const LocoID locoID,
+		__attribute__((unused)) const LocoType locoType,
+		__attribute__((unused)) const Protocol protocol,
+		__attribute__((unused)) const Address address,
+		__attribute__((unused)) const Address serverAddress,
+		__attribute__((unused)) const std::string& name,
 		__attribute__((unused)) const LocoFunctionNr function,
 		__attribute__((unused)) const LocoFunctionState state)
 	{
-		if (!locoBase)
-		{
-			return;
-		}
 //		for (auto client : clients)
 //		{
-//			reinterpret_cast<CS2Client*>(client)->SendLocoInfo(locoBase);
+//			reinterpret_cast<CS2Client*>(client)->SendLocoInfo(locoConfig);
 //		}
 	}
 

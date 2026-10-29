@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -27,8 +27,8 @@ namespace Hardware
 	:	MaerklinCAN(params,
 			"Maerklin Central Station 2 (CS2) UDP / " + params->GetName() + " at IP " + params->GetArg1(),
 			params->GetName()),
-	 	senderConnection(HardwareInterface::logger, params->GetArg1(), CS2SenderPort),
-	 	receiverConnection(HardwareInterface::logger, "0.0.0.0", CS2ReceiverPort)
+		senderConnection(HardwareInterface::logger, params->GetArg1(), CS2SenderPort),
+		receiverConnection(HardwareInterface::logger, "0.0.0.0", CS2ReceiverPort)
 	{
 		HardwareInterface::logger->Info(Languages::TextStarting, GetFullName());
 

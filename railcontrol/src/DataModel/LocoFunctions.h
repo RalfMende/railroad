@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -199,7 +199,8 @@ namespace DataModel
 				Deserialize(serialized);
 			}
 
-			inline void SetFunctionState(const LocoFunctionNr nr, const LocoFunctionState state)
+			inline void SetFunctionState(const LocoFunctionNr nr,
+				const LocoFunctionState state)
 			{
 				if (nr >= NumberOfLocoFunctions)
 				{
@@ -249,6 +250,9 @@ namespace DataModel
 				return entries[nr].state;
 			}
 
+			// FIXME: create GetFunctionStates with only state but not config
+
+			// FIXME: rename to GetFunctionConfigs
 			std::vector<LocoFunctionEntry> GetFunctionStates() const;
 
 			inline void GetFunctions(LocoFunctionEntry* out) const
@@ -281,6 +285,25 @@ namespace DataModel
 					return LocoFunctionTypeNone;
 				}
 				return entries[nr].type;
+			}
+
+			inline LocoFunctionNr GetFunctionNrFromFunctionIcon(const LocoFunctionIcon icon) const
+			{
+				if (icon < NumberOfLocoFunctions)
+				{
+					// icon is function number
+					return icon;
+				}
+				const LocoFunctionIcon realIcon = static_cast<LocoFunctionIcon>(icon - 256);
+				for (int i = 0; i < NumberOfLocoFunctions; ++i)
+				{
+					if (entries[i].icon == realIcon)
+					{
+						// icon is found in config of functions
+						return i;
+					}
+				}
+				return NumberOfLocoFunctions;
 			}
 
 		private:

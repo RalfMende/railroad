@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -29,7 +29,7 @@ namespace Server { namespace Web
 {
 	HtmlTagSignal::HtmlTagSignal(__attribute__((unused)) const Manager& manager, const DataModel::Signal* const signal)
 	:	HtmlTagLayoutItem(dynamic_cast<const DataModel::LayoutItem*>(signal)),
-	 	signal(signal)
+		signal(signal)
 	{
 		image += "<polygon points=\"15,0 21,0 21,36 15,36\" fill=\"white\"/>";
 		image += GetSignalImagePlain(signal);

@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -35,7 +35,7 @@ namespace Hardware
 			params->GetControlID(),
 			"HSI-88 / " + params->GetName() + " at serial port " + params->GetArg1(),
 			params->GetName()),
-	 	serialLine(logger, params->GetArg1(), B9600, 8, 'N', 1),
+		serialLine(logger, params->GetArg1(), B9600, 8, 'N', 1),
 		run(false)
 	{
 		logger->Info(Languages::TextStarting, GetFullName());

@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -21,6 +21,7 @@ along with RailControl; see the file LICENCE. If not see
 #include <algorithm>
 #include <map>
 #include <string>
+#include <thread>
 
 #include "DataModel/LocoBase.h"
 #include "DataModel/Track.h"
@@ -111,12 +112,12 @@ namespace DataModel
 
 	TrackID LocoBase::GetTrackId() const
 	{
+		std::lock_guard<std::mutex> Guard(stateMutex);
 		return (trackFrom ? trackFrom->GetID() : TrackNone);
 	}
 
 	bool LocoBase::Release()
 	{
-		manager->LocoBaseSpeed(ControlTypeInternal, this, MinSpeed);
 		ForceManualMode();
 		{
 			std::lock_guard<std::mutex> Guard(stateMutex);
@@ -157,7 +158,8 @@ namespace DataModel
 			feedbackIdReduced = FeedbackNone;
 			feedbackIdFirst = FeedbackNone;
 		}
-		ReleaseRouteAndTrack();
+		std::thread t(ReleaseRouteAndTrackStatic, this);
+		t.detach();
 		return true;
 	}
 
@@ -381,7 +383,6 @@ namespace DataModel
 
 						case LocoStateError:
 							logger->Error(Languages::TextIsInErrorState);
-							manager->LocoBaseSpeed(ControlTypeInternal, this, MinSpeed);
 							if (requestManualMode)
 							{
 								state = LocoStateOff;
@@ -390,6 +391,11 @@ namespace DataModel
 					}
 					pause = 1;
 				}
+			}
+
+			if (state == LocoStateError)
+			{
+				manager->LocoBaseSpeed(ControlTypeInternal, GetObjectIdentifier(), MinSpeed);
 			}
 
 			ReleaseRouteAndTrack();
@@ -486,21 +492,21 @@ namespace DataModel
 			}
 			manager->TrackPublishState(trackFrom);
 		}
-		manager->LocoBaseOrientation(ControlTypeInternal, this, newLocoOrientation);
+		manager->LocoBaseOrientation(ControlTypeInternal, GetObjectIdentifier(), newLocoOrientation);
 		logger->Info(Languages::TextHeadingToVia, newTrack->GetName(), route->GetName());
 
 		trackFirst = newTrack;
 		routeFirst = route;
-		feedbackIdFirstReduced = FeedbackNone;
-		feedbackIdFirstCreep = FeedbackNone;
 		feedbackIdFirst = FeedbackNone;
-		feedbackIdReduced = routeFirst->GetFeedbackIdReduced();
-		reducedDelay = routeFirst->GetReducedDelay();
-		feedbackIdCreep = routeFirst->GetFeedbackIdCreep();
-		creepDelay = routeFirst->GetCreepDelay();
+		feedbackIdFirstCreep = FeedbackNone;
+		feedbackIdFirstReduced = FeedbackNone;
+		feedbackIdOver = routeFirst->GetFeedbackIdOver();
 		feedbackIdStop = routeFirst->GetFeedbackIdStop();
 		stopDelay = routeFirst->GetStopDelay();
-		feedbackIdOver = routeFirst->GetFeedbackIdOver();
+		feedbackIdCreep = routeFirst->GetFeedbackIdCreep();
+		creepDelay = routeFirst->GetCreepDelay();
+		feedbackIdReduced = routeFirst->GetFeedbackIdReduced();
+		reducedDelay = routeFirst->GetReducedDelay();
 
 		wait = routeFirst->GetWaitAfterRelease();
 
@@ -521,8 +527,10 @@ namespace DataModel
 			default:
 				newSpeed = creepingSpeed;
 				break;
+
+			// FIXME: default = MinSpeed
 		}
-		manager->LocoBaseSpeed(ControlTypeInternal, this, newSpeed);
+		manager->LocoBaseSpeed(ControlTypeInternal, GetObjectIdentifier(), newSpeed);
 		state = LocoStateAutomodeGetSecond;
 	}
 
@@ -585,8 +593,11 @@ namespace DataModel
 		feedbackIdFirstReduced = feedbackIdReduced;
 		feedbackIdOver = routeSecond->GetFeedbackIdOver();
 		feedbackIdStop = routeSecond->GetFeedbackIdStop();
+		stopDelay = routeSecond->GetStopDelay();
 		feedbackIdCreep = routeSecond->GetFeedbackIdCreep();
+		creepDelay = routeSecond->GetCreepDelay();
 		feedbackIdReduced = routeSecond->GetFeedbackIdReduced();
+		reducedDelay = routeSecond->GetReducedDelay();
 
 		wait = routeSecond->GetWaitAfterRelease();
 
@@ -714,7 +725,7 @@ namespace DataModel
 		return true;
 	}
 
-	Speed LocoBase::GetRouteSpeed(const Route::Speed routeSpeed)
+	Speed LocoBase::GetRouteSpeed(const Route::Speed routeSpeed) const
 	{
 		switch (routeSpeed)
 		{
@@ -732,79 +743,104 @@ namespace DataModel
 		}
 	}
 
-	void LocoBase::LocationStopReached(const FeedbackID feedbackID, const Delay stopDelay)
+	Speed LocoBase::LocationStopReached(const FeedbackID feedbackID,
+		const Delay stopDelay)
 	{
 		Utils::Utils::SleepForMilliseconds(stopDelay * 100);
 		if (feedbackID != feedbackIdStop)
 		{
-			return;
+			return speed;
 		}
-		LocationStopReached();
+		return LocationStopReached();
 	}
 
-	void LocoBase::LocationStopReached()
+	Speed LocoBase::LocationStopReached()
 	{
-		manager->LocoBaseSpeed(ControlTypeInternal, this, MinSpeed);
 		feedbackIdsReached.EnqueueBack(feedbackIdStop);
+		return MinSpeed;
 	}
 
-	void LocoBase::LocationCreepReached(const FeedbackID feedbackID, const Delay creepDelay)
+	void LocoBase::LocationStopReachedStatic(Manager* manager,
+		LocoBase* locoBase,
+		const FeedbackID feedbackID,
+		const Delay stopDelay)
+	{
+		Utils::Utils::SetThreadName("LocationStopReachedStatic");
+		const Speed newSpeed = locoBase->LocationStopReached(feedbackID, stopDelay);
+		manager->LocoBaseSpeed(ControlTypeInternal, locoBase->GetObjectIdentifier(), newSpeed);
+	}
+
+	Speed LocoBase::LocationCreepReached(const FeedbackID feedbackID,
+		const Delay creepDelay)
 	{
 		Utils::Utils::SleepForMilliseconds(creepDelay * 100);
 		if (feedbackID != feedbackIdCreep)
 		{
-			return;
+			return speed;
 		}
-		LocationCreepReached();
+		return LocationCreepReached();
 	}
 
-	void LocoBase::LocationCreepReached()
+	Speed LocoBase::LocationCreepReached()
 	{
-		if (speed > creepingSpeed)
-		{
-			manager->LocoBaseSpeed(ControlTypeInternal, this, creepingSpeed);
-		}
 		if (feedbackIdFirst != FeedbackNone)
 		{
 			feedbackIdsReached.EnqueueBack(feedbackIdFirst);
 		}
+		return std::min(speed, creepingSpeed);
 	}
 
-	void LocoBase::LocationReducedReached(const FeedbackID feedbackID, const Delay reducedDelay)
+	void LocoBase::LocationCreepReachedStatic(Manager* manager,
+		LocoBase* locoBase,
+		const FeedbackID feedbackID,
+		const Delay creepDelay)
+	{
+		Utils::Utils::SetThreadName("LocationCreepReachedStatic");
+		const Speed newSpeed = locoBase->LocationCreepReached(feedbackID, creepDelay);
+		manager->LocoBaseSpeed(ControlTypeInternal, locoBase->GetObjectIdentifier(), newSpeed);
+	}
+
+	Speed LocoBase::LocationReducedReached(const FeedbackID feedbackID,
+		const Delay reducedDelay)
 	{
 		Utils::Utils::SleepForMilliseconds(reducedDelay * 100);
 		if (feedbackID != feedbackIdReduced)
 		{
-			return;
+			return speed;
 		}
-		LocationReducedReached();
+		return LocationReducedReached();
 	}
 
-	void LocoBase::LocationReducedReached()
+	Speed LocoBase::LocationReducedReached()
 	{
-		if (speed > reducedSpeed)
-		{
-			manager->LocoBaseSpeed(ControlTypeInternal, this, reducedSpeed);
-		}
 		if (feedbackIdFirst != 0)
 		{
 			feedbackIdsReached.EnqueueBack(feedbackIdFirst);
 		}
+		return std::min(speed, reducedSpeed);
 	}
 
-	void LocoBase::LocationReached(const FeedbackID feedbackID)
+	void LocoBase::LocationReducedReachedStatic(Manager* manager,
+		LocoBase* locoBase,
+		const FeedbackID feedbackID,
+		const Delay reducedDelay)
 	{
+		Utils::Utils::SetThreadName("LocationReducedReachedStatic");
+		const Speed newSpeed = locoBase->LocationReducedReached(feedbackID, reducedDelay);
+		manager->LocoBaseSpeed(ControlTypeInternal, locoBase->GetObjectIdentifier(), newSpeed);
+	}
+
+	Speed LocoBase::LocationReached(const FeedbackID feedbackID)
+	{
+		Speed newSpeed = speed;
 		if (feedbackID == feedbackIdFirstReduced)
 		{
-			Route::Speed routeSpeed = routeSecond->GetSpeed();
+			const Route::Speed routeSpeed = routeSecond->GetSpeed();
 			switch (routeSpeed)
 			{
 				case Route::SpeedReduced:
 				case Route::SpeedCreeping:
-					if (speed > reducedSpeed)
-					{
-						manager->LocoBaseSpeed(ControlTypeInternal, this, reducedSpeed);
-					}
+					newSpeed = std::min(speed, reducedSpeed);
 					break;
 
 				default:
@@ -814,14 +850,11 @@ namespace DataModel
 
 		if (feedbackID == feedbackIdFirstCreep)
 		{
-			Route::Speed routeSpeed = routeSecond->GetSpeed();
+			const Route::Speed routeSpeed = routeSecond->GetSpeed();
 			switch (routeSpeed)
 			{
 				case Route::SpeedCreeping:
-					if (speed > creepingSpeed)
-					{
-						manager->LocoBaseSpeed(ControlTypeInternal, this, creepingSpeed);
-					}
+					newSpeed = std::min(speed, creepingSpeed);
 					break;
 
 				default:
@@ -831,11 +864,8 @@ namespace DataModel
 
 		if (feedbackID == feedbackIdFirst)
 		{
-			Speed newSpeed = GetRouteSpeed(routeSecond->GetSpeed());
-			if (speed > newSpeed)
-			{
-				manager->LocoBaseSpeed(ControlTypeInternal, this, newSpeed);
-			}
+			const Speed nextSpeed = GetRouteSpeed(routeSecond->GetSpeed());
+			newSpeed = std::min(speed, nextSpeed);
 			feedbackIdsReached.EnqueueBack(feedbackIdFirst);
 		}
 
@@ -843,11 +873,12 @@ namespace DataModel
 		{
 			if (reducedDelay)
 			{
-				__attribute((unused)) auto r = std::async(std::launch::async, LocationReducedReachedStatic, this, feedbackID, reducedDelay);
+				std::thread t(LocationReducedReachedStatic, manager, this, feedbackID, reducedDelay);
+				t.detach();
 			}
 			else
 			{
-				LocationReducedReached();
+				newSpeed = LocationReducedReached();
 			}
 		}
 
@@ -855,11 +886,12 @@ namespace DataModel
 		{
 			if (creepDelay)
 			{
-				__attribute((unused)) auto r = std::async(std::launch::async, LocationCreepReachedStatic, this, feedbackID, creepDelay);
+				std::thread t(LocationCreepReachedStatic, manager, this, feedbackID, creepDelay);
+				t.detach();
 			}
 			else
 			{
-				LocationCreepReached();
+				newSpeed = LocationCreepReached();
 			}
 		}
 
@@ -867,20 +899,23 @@ namespace DataModel
 		{
 			if (stopDelay)
 			{
-				__attribute((unused)) auto r = std::async(std::launch::async, LocationStopReachedStatic, this, feedbackID, stopDelay);
+				std::thread t(LocationStopReachedStatic, manager, this, feedbackID, stopDelay);
+				t.detach();
 			}
 			else
 			{
-				LocationStopReached();
+				newSpeed = LocationStopReached();
 			}
 		}
 
 		if (feedbackID == feedbackIdOver)
 		{
-			manager->LocoBaseSpeed(ControlTypeInternal, this, MinSpeed);
 			manager->Booster(ControlTypeInternal, BoosterStateStop);
 			logger->Error(Languages::TextHitOverrun, manager->GetFeedbackName(feedbackID));
+			newSpeed = MinSpeed;
 		}
+
+		return newSpeed;
 	}
 
 	void LocoBase::SetSpeed(const Speed speed)
@@ -903,7 +938,7 @@ namespace DataModel
 	{
 		if (!routeFirst || !trackFrom)
 		{
-			manager->LocoBaseSpeed(ControlTypeInternal, this, MinSpeed);
+			manager->LocoBaseSpeed(ControlTypeInternal, GetObjectIdentifier(), MinSpeed);
 			state = LocoStateError;
 			logger->Error(Languages::TextIsInAutomodeWithoutRouteTrack);
 			return;
@@ -912,7 +947,7 @@ namespace DataModel
 		Speed newSpeed = GetRouteSpeed(routeSecond->GetSpeed());
 		if (speed != newSpeed)
 		{
-			manager->LocoBaseSpeed(ControlTypeInternal, this, newSpeed);
+			manager->LocoBaseSpeed(ControlTypeInternal, GetObjectIdentifier(), newSpeed);
 		}
 
 		ShiftRoute();
@@ -943,7 +978,7 @@ namespace DataModel
 	{
 		if (!routeFirst || !trackFrom)
 		{
-			manager->LocoBaseSpeed(ControlTypeInternal, this, MinSpeed);
+			manager->LocoBaseSpeed(ControlTypeInternal, GetObjectIdentifier(), MinSpeed);
 			state = LocoStateError;
 			logger->Error(Languages::TextIsInAutomodeWithoutRouteTrack);
 			return;
@@ -952,11 +987,11 @@ namespace DataModel
 		if (routeSecond)
 		{
 			// this happens when FeedbackIdFirst has been missed
-			manager->LocoDestinationReached(this, routeSecond, trackSecond);
+			manager->LocoDestinationReached(GetObjectIdentifier(), GetName(), routeSecond->GetID(), routeSecond->GetName(), trackSecond->GetID(), trackSecond->GetName());
 		}
 		else
 		{
-			manager->LocoDestinationReached(this, routeFirst, trackFirst);
+			manager->LocoDestinationReached(GetObjectIdentifier(), GetName(), routeFirst->GetID(), routeFirst->GetName(), trackFirst->GetID(), trackFirst->GetName());
 		}
 		logger->Info(Languages::TextReachedItsDestination);
 
@@ -1001,18 +1036,6 @@ namespace DataModel
 
 		releaseRouteQueue.EnqueueBack(removeRoute);
 		releaseTrackQueue.EnqueueBack(removeTrack);
-	}
-
-	DataModel::LocoFunctionNr LocoBase::GetFunctionNumberFromFunctionIcon(const DataModel::LocoFunctionIcon icon) const
-	{
-		for (DataModel::LocoFunctionNr nr = 0; nr < NumberOfLocoFunctions; ++nr)
-		{
-			if (icon == functions.GetFunctionIcon(nr))
-			{
-				return nr;
-			}
-		}
-		return NumberOfLocoFunctions;
 	}
 
 	LocoBase& LocoBase::operator=(const Hardware::LocoCacheEntry& loco)

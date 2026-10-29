@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -42,7 +42,7 @@ namespace Hardware
 				std::string arg4,
 				std::string arg5)
 			:	manager(nullptr),
-			 	controlID(controlID),
+				controlID(controlID),
 				hardwareType(hardwareType),
 				name(name),
 				arg1(arg1),

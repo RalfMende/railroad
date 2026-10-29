@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -18,10 +18,10 @@ along with RailControl; see the file LICENCE. If not see
 <http://www.gnu.org/licenses/>.
 */
 
-#include <future>
 #include <iostream>
 #include <set>
 #include <sstream>
+#include <thread>
 #include <unistd.h>
 
 #include "DataModel/LayoutItem.h"
@@ -49,7 +49,6 @@ using std::map;
 using std::pair;
 using std::to_string;
 using std::string;
-using std::stringstream;
 using std::vector;
 using Storage::TransactionGuard;
 using Storage::StorageHandler;
@@ -57,7 +56,7 @@ using Storage::StorageParams;
 
 Manager::Manager(Config& config)
 :	logger(Logger::Logger::GetLogger(Languages::GetText(Languages::TextManager))),
- 	boosterState(BoosterStateStop),
+	boosterState(BoosterStateStop),
 	storage(nullptr),
 	startupInitLocos(StartupInitLocosAll),
 	defaultAccessoryDuration(DataModel::DefaultAccessoryPulseDuration),
@@ -345,7 +344,8 @@ void Manager::Booster(const ControlType controlType, const BoosterState state)
 		return;
 	}
 
-	__attribute__((unused)) auto r = std::async(std::launch::async, InitLocosStatic, this);
+	std::thread t(InitLocosStatic, this);
+	t.detach();
 	initLocosDone = true;
 }
 
@@ -356,36 +356,66 @@ void Manager::InitLocos()
 		return;
 	}
 	Utils::Utils::SleepForSeconds(1);
-	map<string,LocoID> locoIds = LocoIdsByName();
-	for (auto locoId : locoIds)
+	map<string,LocoID> locoNames = LocoIdsByName();
+	for (auto locoName : locoNames)
 	{
 		if (!run)
 		{
 			return;
 		}
-		Loco* loco = GetLoco(locoId.second);
-		if (!loco)
+
+		ControlID controlID;
+		LocoID locoID = locoName.second;
+		LocoType locoType;
+		Protocol protocol;
+		Address address;
+		Address serverAddress;
+		std::string name;
+		Speed speed;
+		Orientation orientation;
+		std::vector<DataModel::LocoFunctionEntry> functions;
 		{
-			continue;
+			const Loco* loco = GetLocoInternal(locoID);
+			if (!loco)
+			{
+				continue;
+			}
+			controlID = loco->GetControlID();
+			locoType = loco->GetLocoType();
+			protocol = loco->GetProtocol();
+			address = loco->GetAddress();
+			serverAddress = loco->GetServerAddress();
+			name = loco->GetName();
+			speed = loco->GetSpeed();
+			orientation = loco->GetOrientation();
+			functions = loco->GetFunctionStates();
 		}
 
-		if (GetStartupInitLocos() == StartupInitLocosSpeed)
+		switch (GetStartupInitLocos())
 		{
-			std::lock_guard<std::mutex> guard(controlMutex);
-			for (auto& control : controls)
+			case StartupInitLocosSpeed:
 			{
-				control.second->LocoBaseSpeed(ControlTypeInternal, loco, loco->GetSpeed());
-				control.second->LocoBaseOrientation(ControlTypeInternal, loco, loco->GetOrientation());
+				std::lock_guard<std::mutex> guard(controlMutex);
+				for (auto& control : controls)
+				{
+					control.second->LocoBaseSpeed(ControlTypeInternal, controlID, locoID, locoType, protocol, address, serverAddress, name, speed);
+					control.second->LocoBaseOrientation(ControlTypeInternal, controlID, locoID, locoType, protocol, address, serverAddress, name, orientation);
+				}
+				break;
 			}
-		}
-		else
-		{
-			std::vector<DataModel::LocoFunctionEntry> functions = loco->GetFunctionStates();
-			std::lock_guard<std::mutex> guard(controlMutex);
-			for (auto& control : controls)
+
+			case StartupInitLocosAll:
 			{
-				control.second->LocoBaseSpeedOrientationFunctions(loco, loco->GetSpeed(), loco->GetOrientation(), functions);
+				std::lock_guard<std::mutex> guard(controlMutex);
+				for (auto& control : controls)
+				{
+					control.second->LocoBaseSpeedOrientationFunctionStates(controlID, locoID, locoType, protocol, address, serverAddress, name, speed, orientation, functions);
+				}
+				break;
 			}
+
+			case StartupInitLocosNone:
+				break;
 		}
 		Utils::Utils::SleepForMilliseconds(10);
 	}
@@ -638,21 +668,42 @@ string Manager::GetLocoList() const
 {
 	string out;
 	std::lock_guard<std::mutex> guard(locoMutex);
-	for (auto& loco : locos)
+	for (auto& l : locos)
 	{
-		Loco* l = loco.second;
-		out += to_string(l->GetID()) + ";";
-		out += to_string(l->GetSpeed()) + ";";
-		out += to_string(l->GetOrientation()) + ";";
-		out += to_string(l->GetTrackId()) + ";";
-		out += l->GetName() + "\n";
+		Loco* loco = l.second;
+		out += to_string(loco->GetID()) + ";";
+		out += to_string(loco->GetSpeed()) + ";";
+		out += to_string(loco->GetOrientation()) + ";";
+		out += to_string(loco->GetTrackId()) + ";";
+		out += loco->GetName() + "\n";
 	}
 	return out;
 }
 
-Loco* Manager::GetLoco(const LocoID locoID) const
+const LocoConfig Manager::GetLoco(const LocoID locoID) const
 {
 	std::lock_guard<std::mutex> guard(locoMutex);
+	const Loco* loco = GetLocoInternal(locoID);
+	if (!loco)
+	{
+		return LocoConfig(LocoTypeNone);
+	}
+	return LocoConfig(*loco);
+}
+
+const string& Manager::GetLocoName(const LocoID locoID) const
+{
+	std::lock_guard<std::mutex> guard(locoMutex);
+	const Loco* loco = GetLocoInternal(locoID);
+	if (!loco)
+	{
+		return unknownLoco;
+	}
+	return loco->GetName();
+}
+
+Loco* Manager::GetLocoInternal(const LocoID locoID) const
+{
 	if (locos.count(locoID) != 1)
 	{
 		return nullptr;
@@ -660,12 +711,12 @@ Loco* Manager::GetLoco(const LocoID locoID) const
 	return locos.at(locoID);
 }
 
-LocoConfig Manager::GetLocoOfConfigByMatchKey(const ControlID controlId, const string& matchKey) const
+const LocoConfig Manager::GetLocoOfConfigByMatchKey(const ControlID controlId, const string& matchKey) const
 {
 	ControlInterface* control = GetControl(controlId);
 	if (!control)
 	{
-		return LocoConfig(LocoTypeLoco);
+		return LocoConfig(LocoTypeNone);
 	}
 	return control->GetLocoByMatchKey(matchKey);
 }
@@ -673,12 +724,12 @@ LocoConfig Manager::GetLocoOfConfigByMatchKey(const ControlID controlId, const s
 Loco* Manager::GetLocoByMatchKey(const ControlID controlId, const string& matchKey) const
 {
 	std::lock_guard<std::mutex> guard(locoMutex);
-	for (auto& loco : locos)
+	for (auto& l : locos)
 	{
-		Loco* locoConfig = loco.second;
-		if (locoConfig->GetControlID() == controlId && locoConfig->GetMatchKey().compare(matchKey) == 0)
+		Loco* loco = l.second;
+		if (loco->GetControlID() == controlId && loco->GetMatchKey().compare(matchKey) == 0)
 		{
-			return loco.second;
+			return loco;
 		}
 	}
 	return nullptr;
@@ -686,7 +737,8 @@ Loco* Manager::GetLocoByMatchKey(const ControlID controlId, const string& matchK
 
 void Manager::LocoRemoveMatchKey(const LocoID locoId)
 {
-	Loco* loco = GetLoco(locoId);
+	std::lock_guard<std::mutex> guard(locoMutex);
+	Loco* loco = GetLocoInternal(locoId);
 	if (!loco)
 	{
 		return;
@@ -696,7 +748,8 @@ void Manager::LocoRemoveMatchKey(const LocoID locoId)
 
 void Manager::LocoReplaceMatchKey(const LocoID locoId, const std::string& newMatchKey)
 {
-	Loco* loco = GetLoco(locoId);
+	std::lock_guard<std::mutex> guard(locoMutex);
+	Loco* loco = GetLocoInternal(locoId);
 	if (!loco)
 	{
 		return;
@@ -714,23 +767,31 @@ const map<string,LocoConfig> Manager::GetUnmatchedLocosOfControl(const ControlID
 		return out;
 	}
 	out = control->GetUnmatchedLocos(matchKey);
-	out[""].SetName("");
+	out.emplace("", LocoTypeNone);
 	return out;
 }
 
-Loco* Manager::GetLoco(const ControlID controlID, const Protocol protocol, const Address address) const
+Loco* Manager::GetLocoInternal(const ControlID controlID, const Protocol protocol, const Address address) const
 {
-	std::lock_guard<std::mutex> guard(locoMutex);
-	for (auto& loco : locos)
+	for (auto& l : locos)
 	{
-		if (loco.second->GetControlID() == controlID
-			&& loco.second->GetProtocol() == protocol
-			&& loco.second->GetAddress() == address)
+		Loco* loco = l.second;
+		if (loco->GetControlID() == controlID
+			&& loco->GetProtocol() == protocol
+			&& loco->GetAddress() == address)
 		{
-			return loco.second;
+			return loco;
 		}
 	}
 	return nullptr;
+}
+
+LocoBase* Manager::GetLocoBaseInternal(const DataModel::ObjectIdentifier& locoBaseIdentifier) const
+{
+	// FIXME: this method should be removed
+	return locoBaseIdentifier.GetObjectType() == ObjectTypeLoco
+		? static_cast<DataModel::LocoBase*>(GetLocoInternal(locoBaseIdentifier.GetObjectID()))
+		: static_cast<DataModel::LocoBase*>(GetMultipleUnitInternal(locoBaseIdentifier.GetObjectID()));
 }
 
 const map<string,LocoID> Manager::LocoBaseListFree() const
@@ -738,21 +799,23 @@ const map<string,LocoID> Manager::LocoBaseListFree() const
 	map<string,LocoID> out;
 	{
 		std::lock_guard<std::mutex> guard(locoMutex);
-		for (auto& loco : locos)
+		for (auto& l : locos)
 		{
-			if (!loco.second->IsInUse())
+			Loco* loco = l.second;
+			if (!loco->IsInUse())
 			{
-				out[loco.second->GetName()] = loco.second->GetID();
+				out[loco->GetName()] = loco->GetID();
 			}
 		}
 	}
 	{
 		std::lock_guard<std::mutex> guard(multipleUnitMutex);
-		for (auto& multipleUnit : multipleUnits)
+		for (auto& m : multipleUnits)
 		{
-			if (!multipleUnit.second->IsInUse())
+			MultipleUnit* multipleUnit = m.second;
+			if (!multipleUnit->IsInUse())
 			{
-				out[multipleUnit.second->GetName()] = multipleUnit.second->GetID() + MultipleUnitIdPrefix;
+				out[multipleUnit->GetName()] = multipleUnit->GetID() + MultipleUnitIdPrefix;
 			}
 		}
 	}
@@ -764,9 +827,10 @@ const map<string,DataModel::LocoConfig> Manager::LocoConfigByName() const
 	map<string,DataModel::LocoConfig> out;
 	{
 		std::lock_guard<std::mutex> guard(locoMutex);
-		for (auto& loco : locos)
+		for (auto& l : locos)
 		{
-			out[loco.second->GetName()] = *(loco.second);
+			Loco* loco = l.second;
+			out.emplace(loco->GetName(), *loco);
 		}
 	}
 	std::lock_guard<std::mutex> guard(controlMutex);
@@ -783,10 +847,10 @@ const map<string,LocoID> Manager::LocoIdsByName() const
 	map<string,LocoID> out;
 	{
 		std::lock_guard<std::mutex> guard(locoMutex);
-		for (auto& loco : locos)
+		for (auto& l : locos)
 		{
-			Loco* locoEntry = loco.second;
-			out[locoEntry->GetName()] = locoEntry->GetID();
+			Loco* loco = l.second;
+			out.emplace(loco->GetName(), loco->GetID());
 		}
 	}
 	return out;
@@ -815,39 +879,44 @@ bool Manager::LocoSave(LocoID locoID,
 		return false;
 	}
 
-	Loco* loco = GetLoco(locoID);
-	if (!loco)
+	const string newName = CheckObjectName(multipleUnits, multipleUnitMutex, MultipleUnitNone, CheckObjectName(locos, locoMutex, locoID, name.size() == 0 ? Languages::GetText(Languages::TextLoco) : name));
+
 	{
-		loco = CreateAndAddObject(locos, locoMutex);
+		std::lock_guard<std::mutex> guard(locoMutex);
+		Loco* loco = GetLocoInternal(locoID);
+		if (!loco)
+		{
+			loco = CreateAndAddObject(locos);
+		}
+
+		if (!loco)
+		{
+			result = Languages::GetText(Languages::TextUnableToAddLoco);
+			return false;
+		}
+
+		// if we have a new object we have to update locoID
+		locoID = loco->GetID();
+
+		loco->SetName(newName);
+		loco->SetControlID(controlID);
+		loco->SetMatchKey(matchKey);
+		loco->SetProtocol(protocol);
+		loco->SetAddress(address);
+		loco->SetServerAddress(serverAddress);
+		loco->SetLength(length);
+		loco->SetPushpull(pushpull);
+		loco->SetMaxSpeed(maxSpeed);
+		loco->SetTravelSpeed(travelSpeed);
+		loco->SetReducedSpeed(reducedSpeed);
+		loco->SetCreepingSpeed(creepingSpeed);
+		loco->SetPropulsion(propulsion);
+		loco->SetTrainType(type);
+		loco->ConfigureFunctions(locoFunctions);
+
+		// save in db
+		LocoSave(loco);
 	}
-
-	if (!loco)
-	{
-		result = Languages::GetText(Languages::TextUnableToAddLoco);
-		return false;
-	}
-
-	// if we have a new object we have to update locoID
-	locoID = loco->GetID();
-
-	loco->SetName(CheckObjectName(multipleUnits, multipleUnitMutex, MultipleUnitNone, CheckObjectName(locos, locoMutex, locoID, name.size() == 0 ? Languages::GetText(Languages::TextLoco) : name)));
-	loco->SetControlID(controlID);
-	loco->SetMatchKey(matchKey);
-	loco->SetProtocol(protocol);
-	loco->SetAddress(address);
-	loco->SetServerAddress(serverAddress);
-	loco->SetLength(length);
-	loco->SetPushpull(pushpull);
-	loco->SetMaxSpeed(maxSpeed);
-	loco->SetTravelSpeed(travelSpeed);
-	loco->SetReducedSpeed(reducedSpeed);
-	loco->SetCreepingSpeed(creepingSpeed);
-	loco->SetPropulsion(propulsion);
-	loco->SetTrainType(type);
-	loco->ConfigureFunctions(locoFunctions);
-
-	// save in db
-	LocoSave(loco);
 
 	std::lock_guard<std::mutex> guard(controlMutex);
 	for (auto& control : controls)
@@ -921,38 +990,44 @@ bool Manager::LocoProtocolAddress(const LocoID locoID, ControlID& controlID, Pro
 	return true;
 }
 
-bool Manager::LocoBaseSpeed(const ControlType controlType,
-	LocoBase* loco,
+void Manager::LocoSpeed(const ControlType controlType,
+	const ControlID controlID,
+	const Protocol protocol,
+	const Address address,
 	const Speed speed)
 {
-	if (!loco)
+	LocoID locoID;
+	LocoType locoType;
+	Address serverAddress;
+	std::string name;
+	Speed newSpeed;
 	{
-		return false;
+		std::lock_guard<std::mutex> guard(locoMutex);
+		DataModel::Loco* loco = GetLocoInternal(controlID, protocol, address);
+		if (!loco)
+		{
+			return;
+		}
+
+		const bool change = LocoBaseSpeedInternal(loco, speed);
+		if (!change)
+		{
+			return;
+		}
+
+		locoID = loco->GetID();
+		locoType = loco->GetLocoType();
+		serverAddress = loco->GetServerAddress();
+		name = loco->GetName();
+		newSpeed = loco->GetSpeed();
 	}
-	Speed newSpeed = speed;
-	if (speed > MaxSpeed)
-	{
-		newSpeed = MaxSpeed;
-	}
-	const string& locoName = loco->GetName();
-	logger->Info(Languages::TextLocoSpeedIs, locoName, newSpeed);
-	const Speed oldSpeed = loco->GetSpeed();
-	if (oldSpeed == newSpeed)
-	{
-		return true;
-	}
-	loco->SetSpeed(newSpeed);
-	std::lock_guard<std::mutex> guard(controlMutex);
-	for (auto& control : controls)
-	{
-		control.second->LocoBaseSpeed(controlType, loco, newSpeed);
-	}
-	return true;
+	LocoBasePublishSpeed(controlType, controlID, locoID, locoType, protocol, address, serverAddress, name, newSpeed);
 }
 
 Speed Manager::LocoSpeed(const LocoID locoID) const
 {
-	Loco* loco = GetLoco(locoID);
+	std::lock_guard<std::mutex> guard(locoMutex);
+	const Loco* loco = GetLocoInternal(locoID);
 	if (!loco)
 	{
 		return MinSpeed;
@@ -960,93 +1035,109 @@ Speed Manager::LocoSpeed(const LocoID locoID) const
 	return loco->GetSpeed();
 }
 
-void Manager::LocoBaseOrientation(const ControlType controlType,
-	LocoBase* loco,
-	Orientation orientation)
+void Manager::LocoOrientation(const ControlType controlType,
+	const ControlID controlID,
+	const Protocol protocol,
+	const Address address,
+	const Orientation orientation)
 {
-	if (!loco)
+	LocoID locoID;
+	LocoType locoType;
+	Address serverAddress;
+	std::string name;
+	Orientation newOrientation;
 	{
-		return;
+		std::lock_guard<std::mutex> guard(locoMutex);
+		DataModel::Loco* loco = GetLocoInternal(controlID, protocol, address);
+		if (!loco)
+		{
+			return;
+		}
+		const bool change = LocoBaseOrientation(loco, orientation);
+		if (!change)
+		{
+			return;
+		}
+		locoID = loco->GetID();
+		locoType = loco->GetLocoType();
+		serverAddress = loco->GetServerAddress();
+		name = loco->GetName();
+		newOrientation = loco->GetOrientation();
 	}
-
-	if (orientation == OrientationChange)
-	{
-		const Orientation oldOrientation = loco->GetOrientation();
-		orientation = (oldOrientation == OrientationLeft ? OrientationRight : OrientationLeft);
-	}
-
-	logger->Info(orientation ? Languages::TextLocoDirectionOfTravelIsRight : Languages::TextLocoDirectionOfTravelIsLeft, loco->GetName());
-	const Orientation oldOrientation = loco->GetOrientation();
-	if (oldOrientation == orientation)
-	{
-		return;
-	}
-	loco->SetOrientation(orientation);
-	std::lock_guard<std::mutex> guard(controlMutex);
-	for (auto& control : controls)
-	{
-		control.second->LocoBaseOrientation(controlType, loco, orientation);
-	}
+	LocoBasePublishOrientation(controlType, controlID, locoID, locoType, protocol, address, serverAddress, name, newOrientation);
+	return;
 }
 
-void Manager::LocoBaseFunctionState(const ControlType controlType,
-	const ObjectIdentifier& locoBaseIdentifier,
-	const DataModel::LocoFunctionNr function,
-	const DataModel::LocoFunctionState on)
+void Manager::LocoFunctionState(const ControlType controlType,
+	const ControlID controlID,
+	const Protocol protocol,
+	const Address address,
+	const LocoFunctionNr function,
+	const DataModel::LocoFunctionState state)
 {
-	LocoBase* loco = GetLocoBase(locoBaseIdentifier);
-	if (!loco)
+	LocoID locoID;
+	LocoType locoType;
+	Address serverAddress;
+	std::string name;
+	DataModel::LocoFunctionState newState;
 	{
-		return;
+		std::lock_guard<std::mutex> guard(locoMutex);
+		DataModel::Loco* loco = GetLocoInternal(controlID, protocol, address);
+		if (!loco)
+		{
+			return;
+		}
+		const bool change = LocoBaseFunctionState(loco, function, state);
+		if (!change)
+		{
+			return;
+		}
+		locoID = loco->GetID();
+		locoType = loco->GetLocoType();
+		serverAddress = loco->GetServerAddress();
+		name = loco->GetName();
+		newState = loco->GetFunctionState(function);
 	}
-
-	DataModel::LocoFunctionNr functionInternal = function;
-	if (function >= NumberOfLocoFunctions)
-	{
-		functionInternal = loco->GetFunctionNumberFromFunctionIcon(static_cast<DataModel::LocoFunctionIcon>(function - 256));
-	}
-	LocoBaseFunctionState(controlType, loco, functionInternal, on);
-}
-
-void Manager::LocoBaseFunctionState(const ControlType controlType,
-	LocoBase* loco,
-	const DataModel::LocoFunctionNr function,
-	const DataModel::LocoFunctionState on)
-{
-	if (!loco)
-	{
-		return;
-	}
-
-	logger->Info(on ? Languages::TextLocoFunctionIsOn : Languages::TextLocoFunctionIsOff, loco->GetName(), function);
-	const DataModel::LocoFunctionState oldOn = loco->GetFunctionState(function);
-	if (oldOn == on)
-	{
-		return;
-	}
-	loco->SetFunctionState(function, on);
-	std::lock_guard<std::mutex> guard(controlMutex);
-	for (auto& control : controls)
-	{
-		control.second->LocoBaseFunction(controlType, loco, function, on);
-	}
+	LocoBasePublishFunctionState(controlType, controlID, locoID, locoType, protocol, address, serverAddress, name, function, newState);
+	return;
 }
 
 /***************************
 * MultipleUnit             *
 ***************************/
 
-MultipleUnit* Manager::GetMultipleUnit(const MultipleUnitID multipleUnitId) const
+const LocoConfig Manager::GetMultipleUnit(const MultipleUnitID multipleUnitID) const
 {
 	std::lock_guard<std::mutex> guard(multipleUnitMutex);
-	if (multipleUnits.count(multipleUnitId) != 1)
+	MultipleUnit* multipleUnit = GetMultipleUnitInternal(multipleUnitID);
+	if (!multipleUnit)
+	{
+		return LocoConfig(LocoTypeMultipleUnit);
+	}
+	return LocoConfig(*multipleUnit);
+}
+
+const string& Manager::GetMultipleUnitName(const MultipleUnitID multipleUnitID) const
+{
+	std::lock_guard<std::mutex> guard(locoMutex);
+	MultipleUnit* multipleUnit = GetMultipleUnitInternal(multipleUnitID);
+	if (!multipleUnit)
+	{
+		return unknownMultipleUnit;
+	}
+	return multipleUnit->GetName();
+}
+
+MultipleUnit* Manager::GetMultipleUnitInternal(const MultipleUnitID multipleUnitID) const
+{
+	if (multipleUnits.count(multipleUnitID) != 1)
 	{
 		return nullptr;
 	}
-	return multipleUnits.at(multipleUnitId);
+	return multipleUnits.at(multipleUnitID);
 }
 
-LocoConfig Manager::GetMultipleUnitOfConfigByMatchKey(const ControlID controlId, const string& matchKey) const
+const LocoConfig Manager::GetMultipleUnitOfConfigByMatchKey(const ControlID controlId, const string& matchKey) const
 {
 	ControlInterface* control = GetControl(controlId);
 	if (!control)
@@ -1063,7 +1154,7 @@ const map<string,DataModel::LocoConfig> Manager::MultipleUnitConfigByName() cons
 		std::lock_guard<std::mutex> guard(multipleUnitMutex);
 		for (auto& multipleUnit : multipleUnits)
 		{
-			out[multipleUnit.second->GetName()] = *(multipleUnit.second);
+			out.emplace(multipleUnit.second->GetName(), *(multipleUnit.second));
 		}
 	}
 	std::lock_guard<std::mutex> guard(controlMutex);
@@ -1097,47 +1188,51 @@ bool Manager::MultipleUnitSave(MultipleUnitID multipleUnitID,
 		return false;
 	}
 
-	MultipleUnit* multipleUnit = GetMultipleUnit(multipleUnitID);
-	if (!multipleUnit)
-	{
-		multipleUnit = CreateAndAddObject(multipleUnits, multipleUnitMutex);
-	}
+	const string newName = CheckObjectName(locos, locoMutex, LocoNone, CheckObjectName(multipleUnits, multipleUnitMutex, multipleUnitID, name.size() == 0 ? Languages::GetText(Languages::TextMultipleUnit) : name));
 
-	if (!multipleUnit)
 	{
-		result = Languages::GetText(Languages::TextUnableToAddMultipleUnit);
-		return false;
-	}
-
-	// if we have a new object we have to update multipleUnitID
-	if (multipleUnitID == 0)
-	{
-		multipleUnitID = multipleUnit->GetID();
-		for (auto slave : slaves)
+		std::lock_guard<std::mutex> guard(multipleUnitMutex);
+		MultipleUnit* multipleUnit = GetMultipleUnitInternal(multipleUnitID);
+		if (!multipleUnit)
 		{
-			slave->ObjectID1(multipleUnitID);
+			multipleUnit = CreateAndAddObject(multipleUnits, multipleUnitMutex);
 		}
+
+		if (!multipleUnit)
+		{
+			result = Languages::GetText(Languages::TextUnableToAddMultipleUnit);
+			return false;
+		}
+
+		// if we have a new object we have to update multipleUnitID
+		if (multipleUnitID == MultipleUnitNone)
+		{
+			multipleUnitID = multipleUnit->GetID();
+			for (auto slave : slaves)
+			{
+				slave->ObjectID1(multipleUnitID);
+			}
+		}
+
+		multipleUnit->SetName(newName);
+		multipleUnit->SetControlID(controlID);
+		multipleUnit->SetMatchKey(matchKey);
+		multipleUnit->SetProtocol(ProtocolNone);
+		multipleUnit->SetAddress(address);
+		multipleUnit->SetServerAddress(serverAddress);
+		multipleUnit->SetLength(length);
+		multipleUnit->SetPushpull(pushpull);
+		multipleUnit->SetMaxSpeed(maxSpeed);
+		multipleUnit->SetTravelSpeed(travelSpeed);
+		multipleUnit->SetReducedSpeed(reducedSpeed);
+		multipleUnit->SetCreepingSpeed(creepingSpeed);
+		multipleUnit->SetTrainType(type);
+		multipleUnit->ConfigureFunctions(locoFunctions);
+		multipleUnit->AssignSlaves(slaves);
+
+		// save in db
+		MultipleUnitSave(multipleUnit);
 	}
-
-	// FIXME: replace "M" with language dependent word
-	multipleUnit->SetName(CheckObjectName(locos, locoMutex, LocoNone, CheckObjectName(multipleUnits, multipleUnitMutex, multipleUnitID, name.size() == 0 ? Languages::GetText(Languages::TextMultipleUnit) : name)));
-	multipleUnit->SetControlID(controlID);
-	multipleUnit->SetMatchKey(matchKey);
-	multipleUnit->SetProtocol(ProtocolNone);
-	multipleUnit->SetAddress(address);
-	multipleUnit->SetServerAddress(serverAddress);
-	multipleUnit->SetLength(length);
-	multipleUnit->SetPushpull(pushpull);
-	multipleUnit->SetMaxSpeed(maxSpeed);
-	multipleUnit->SetTravelSpeed(travelSpeed);
-	multipleUnit->SetReducedSpeed(reducedSpeed);
-	multipleUnit->SetCreepingSpeed(creepingSpeed);
-	multipleUnit->SetTrainType(type);
-	multipleUnit->ConfigureFunctions(locoFunctions);
-	multipleUnit->AssignSlaves(slaves);
-
-	// save in db
-	MultipleUnitSave(multipleUnit);
 
 	std::lock_guard<std::mutex> guard(controlMutex);
 	for (auto& control : controls)
@@ -1190,6 +1285,290 @@ bool Manager::MultipleUnitDelete(const MultipleUnitID multipleUnitID, string& re
 	return true;
 }
 
+/***************************
+* Loco Base                *
+***************************/
+
+const LocoConfig Manager::GetLocoBase(const ObjectIdentifier& locoBaseIdentifier) const
+{
+	const ObjectType type = locoBaseIdentifier.GetObjectType();
+	std::mutex& mutex = (type == ObjectTypeLoco ? locoMutex : multipleUnitMutex);
+	{
+		LocoBase* locoBase = nullptr;
+		std::lock_guard<std::mutex> guard(mutex);
+		if (type == ObjectTypeLoco)
+		{
+			locoBase = GetLocoInternal(locoBaseIdentifier.GetObjectID());
+		}
+		else
+		{
+			locoBase = GetMultipleUnitInternal(locoBaseIdentifier.GetObjectID());
+		}
+
+		if (!locoBase)
+		{
+			return LocoConfig(LocoTypeNone);
+		}
+
+		return LocoConfig(*locoBase);
+	}
+}
+
+bool Manager::LocoBaseSpeed(const ControlType controlType,
+	const ObjectIdentifier& locoBaseIdentifier,
+	const Speed speed)
+{
+	const ObjectType type = locoBaseIdentifier.GetObjectType();
+	std::mutex& mutex = (type == ObjectTypeLoco ? locoMutex : multipleUnitMutex);
+
+	ControlID controlID;
+	LocoID locoID;
+	LocoType locoType;
+	Protocol protocol;
+	Address address;
+	Address serverAddress;
+	std::string name;
+	Speed newSpeed;
+	{
+		LocoBase* locoBase = nullptr;
+		std::lock_guard<std::mutex> guard(mutex);
+		if (type == ObjectTypeLoco)
+		{
+			locoBase = GetLocoInternal(locoBaseIdentifier.GetObjectID());
+		}
+		else
+		{
+			locoBase = GetMultipleUnitInternal(locoBaseIdentifier.GetObjectID());
+		}
+
+		if (!locoBase)
+		{
+			return false;
+		}
+
+		const bool change = LocoBaseSpeedInternal(locoBase, speed);
+		if (!change)
+		{
+			return true;
+		}
+
+		controlID = locoBase->GetControlID();
+		locoID = locoBase->GetID();
+		locoType = locoBase->GetLocoType();
+		protocol = locoBase->GetProtocol();
+		address = locoBase->GetAddress();
+		serverAddress = locoBase->GetServerAddress();
+		name = locoBase->GetName();
+		newSpeed = locoBase->GetSpeed();
+	}
+	LocoBasePublishSpeed(controlType, controlID, locoID, locoType, protocol, address, serverAddress, name, newSpeed);
+	return true;
+}
+
+bool Manager::LocoBaseSpeedInternal(LocoBase* locoBase,
+	const Speed speed)
+{
+	const Speed newSpeed = std::min(MaxSpeed, speed);
+	const string& locoName = locoBase->GetName();
+	const Speed oldSpeed = locoBase->GetSpeed();
+	if (oldSpeed == newSpeed)
+	{
+		// This is needed because WebClient can overflow with identical updates
+		return false;
+	}
+	logger->Info(Languages::TextLocoSpeedIs, locoName, newSpeed);
+	locoBase->SetSpeed(newSpeed);
+	return true;
+}
+
+void Manager::LocoBasePublishSpeed(const ControlType controlType,
+	const ControlID controlID,
+	const LocoID locoID,
+	const LocoType locoType,
+	const Protocol protocol,
+	const Address address,
+	const Address serverAddress,
+	const string& name,
+	const Speed speed)
+{
+	std::lock_guard<std::mutex> guard(controlMutex);
+	for (auto& control : controls)
+	{
+		control.second->LocoBaseSpeed(controlType, controlID, locoID, locoType, protocol, address, serverAddress, name, speed);
+	}
+}
+
+bool Manager::LocoBaseOrientation(const ControlType controlType,
+	const DataModel::ObjectIdentifier& locoBaseIdentifier,
+	const Orientation orientation)
+{
+	const ObjectType type = locoBaseIdentifier.GetObjectType();
+	std::mutex& mutex = (type == ObjectTypeLoco ? locoMutex : multipleUnitMutex);
+	ControlID controlID;
+	LocoID locoID;
+	LocoType locoType;
+	Protocol protocol;
+	Address address;
+	Address serverAddress;
+	std::string name;
+	Orientation newOrientation;
+	{
+		LocoBase* locoBase = nullptr;
+		std::lock_guard<std::mutex> guard(mutex);
+		if (type == ObjectTypeLoco)
+		{
+			locoBase = GetLocoInternal(locoBaseIdentifier.GetObjectID());
+		}
+		else
+		{
+			locoBase = GetMultipleUnitInternal(locoBaseIdentifier.GetObjectID());
+		}
+
+		if (!locoBase)
+		{
+			return false;
+		}
+
+		const bool change = LocoBaseOrientation(locoBase, orientation);
+		if (!change)
+		{
+			return true;
+		}
+
+		controlID = locoBase->GetControlID();
+		locoID = locoBase->GetID();
+		locoType = locoBase->GetLocoType();
+		protocol = locoBase->GetProtocol();
+		address = locoBase->GetAddress();
+		serverAddress = locoBase->GetServerAddress();
+		name = locoBase->GetName();
+		newOrientation = locoBase->GetOrientation();
+	}
+	LocoBasePublishOrientation(controlType, controlID, locoID, locoType, protocol, address, serverAddress, name, newOrientation);
+	return true;
+}
+
+bool Manager::LocoBaseOrientation(LocoBase* locoBase,
+	const Orientation orientation)
+{
+	Orientation newOrientation = orientation;
+	const Orientation oldOrientation = locoBase->GetOrientation();
+	if (newOrientation == OrientationChange)
+	{
+		newOrientation = (oldOrientation == OrientationLeft ? OrientationRight : OrientationLeft);
+	}
+
+	if (oldOrientation == newOrientation)
+	{
+		// This is needed because WebClient can overflow with identical updates
+		return false;
+	}
+	logger->Info(newOrientation ? Languages::TextLocoDirectionOfTravelIsRight : Languages::TextLocoDirectionOfTravelIsLeft, locoBase->GetName());
+	locoBase->SetOrientation(newOrientation);
+	return true;
+}
+
+void Manager::LocoBasePublishOrientation(const ControlType controlType,
+	const ControlID controlID,
+	const LocoID locoID,
+	const LocoType locoType,
+	const Protocol protocol,
+	const Address address,
+	const Address serverAddress,
+	const string& name,
+	const Orientation orientation)
+{
+	std::lock_guard<std::mutex> guard(controlMutex);
+	for (auto& control : controls)
+	{
+		control.second->LocoBaseOrientation(controlType, controlID, locoID, locoType, protocol, address, serverAddress, name, orientation);
+	}
+}
+
+bool Manager::LocoBaseFunctionState(const ControlType controlType,
+	const DataModel::ObjectIdentifier& locoBaseIdentifier,
+	const LocoFunctionIcon icon,
+	const DataModel::LocoFunctionState state)
+{
+	const ObjectType type = locoBaseIdentifier.GetObjectType();
+	std::mutex& mutex = (type == ObjectTypeLoco ? locoMutex : multipleUnitMutex);
+	ControlID controlID;
+	LocoID locoID;
+	LocoType locoType;
+	Protocol protocol;
+	Address address;
+	Address serverAddress;
+	std::string name;
+	LocoFunctionNr function;
+	{
+		LocoBase* locoBase = nullptr;
+		std::lock_guard<std::mutex> guard(mutex);
+		if (type == ObjectTypeLoco)
+		{
+			locoBase = GetLocoInternal(locoBaseIdentifier.GetObjectID());
+		}
+		else
+		{
+			locoBase = GetMultipleUnitInternal(locoBaseIdentifier.GetObjectID());
+		}
+
+		if (!locoBase)
+		{
+			return false;
+		}
+
+		function = locoBase->GetFunctionNrFromFunctionIcon(icon);
+		const bool change = LocoBaseFunctionState(locoBase, function, state);
+		if (!change)
+		{
+			return true;
+		}
+
+		controlID = locoBase->GetControlID();
+		locoID = locoBase->GetID();
+		locoType = locoBase->GetLocoType();
+		protocol = locoBase->GetProtocol();
+		address = locoBase->GetAddress();
+		serverAddress = locoBase->GetServerAddress();
+		name = locoBase->GetName();
+	}
+	LocoBasePublishFunctionState(controlType, controlID, locoID, locoType, protocol, address, serverAddress, name, function, state);
+	return true;
+}
+
+bool Manager::LocoBaseFunctionState(LocoBase* locoBase,
+	const LocoFunctionNr function,
+	const DataModel::LocoFunctionState newState)
+{
+	const DataModel::LocoFunctionState oldState = locoBase->GetFunctionState(function);
+	if (oldState == newState)
+	{
+		// This is needed because WebClient can overflow with identical updates
+		return false;
+	}
+	logger->Info(newState ? Languages::TextLocoFunctionIsOn : Languages::TextLocoFunctionIsOff, locoBase->GetName(), function);
+	locoBase->SetFunctionState(function, newState);
+	return true;
+}
+
+void Manager::LocoBasePublishFunctionState(const ControlType controlType,
+	const ControlID controlID,
+	const LocoID locoID,
+	const LocoType locoType,
+	const Protocol protocol,
+	const Address address,
+	const Address serverAddress,
+	const string& name,
+	const LocoFunctionNr function,
+	const DataModel::LocoFunctionState state)
+{
+	std::lock_guard<std::mutex> guard(controlMutex);
+	for (auto& control : controls)
+	{
+		control.second->LocoBaseFunctionState(controlType, controlID, locoID, locoType, protocol, address, serverAddress, name, function, state);
+	}
+}
+
 const map<string,LocoID> Manager::LocoBaseIdsByName() const
 {
 	map<string,LocoID> out = LocoIdsByName();
@@ -1204,14 +1583,106 @@ const map<string,LocoID> Manager::LocoBaseIdsByName() const
 	return out;
 }
 
+Logger::Logger* Manager::CheckFreeingTrack(const DataModel::ObjectIdentifier& locoBaseIdentifier,
+	const TrackID trackID) const
+{
+	const ObjectType type = locoBaseIdentifier.GetObjectType();
+	std::mutex& mutex = (type == ObjectTypeLoco ? locoMutex : multipleUnitMutex);
+	LocoConfig locoConfig;
+	{
+		LocoBase* locoBase = nullptr;
+		std::lock_guard<std::mutex> guard(mutex);
+		if (type == ObjectTypeLoco)
+		{
+			locoBase = GetLocoInternal(locoBaseIdentifier.GetObjectID());
+		}
+		else
+		{
+			locoBase = GetMultipleUnitInternal(locoBaseIdentifier.GetObjectID());
+		}
+
+		if (!locoBase)
+		{
+			return nullptr;
+		}
+
+		const bool freeOK = locoBase->CheckFreeingTrack(trackID);
+		if (!freeOK)
+		{
+			return nullptr;
+		}
+
+		return locoBase->GetLogger();
+	}
+}
+
+
 const std::string& Manager::GetLocoBaseName(const ObjectIdentifier& locoBaseIdentifier) const
 {
-	const LocoBase* locoBase = GetLocoBase(locoBaseIdentifier);
-	if (!locoBase)
+	const ObjectID objectID = locoBaseIdentifier.GetObjectID();
+	const ObjectType objectType = locoBaseIdentifier.GetObjectType();
+	switch (objectType)
 	{
-		return unknownLoco;
+		case ObjectTypeLoco:
+			return GetLocoName(objectID);
+
+		case ObjectTypeMultipleUnit:
+			return GetMultipleUnitName(objectID);
+
+		default:
+			return unknownLoco;
 	}
-	return locoBase->GetName();
+}
+
+bool Manager::LocationReached(const DataModel::ObjectIdentifier& locoBaseIdentifier,
+	const FeedbackID feedbackID)
+{
+	const ObjectType type = locoBaseIdentifier.GetObjectType();
+	std::mutex& mutex = (type == ObjectTypeLoco ? locoMutex : multipleUnitMutex);
+
+	ControlID controlID;
+	LocoID locoID;
+	LocoType locoType;
+	Protocol protocol;
+	Address address;
+	Address serverAddress;
+	std::string name;
+	Speed newSpeed;
+	{
+		LocoBase* locoBase = nullptr;
+		std::lock_guard<std::mutex> guard(mutex);
+		if (type == ObjectTypeLoco)
+		{
+			locoBase = GetLocoInternal(locoBaseIdentifier.GetObjectID());
+		}
+		else
+		{
+			locoBase = GetMultipleUnitInternal(locoBaseIdentifier.GetObjectID());
+		}
+
+		if (!locoBase)
+		{
+			return false;
+		}
+
+		newSpeed = locoBase->LocationReached(feedbackID);
+		const bool change = LocoBaseSpeedInternal(locoBase, newSpeed);
+		if (!change)
+		{
+			return true;
+		}
+
+		controlID = locoBase->GetControlID();
+		locoID = locoBase->GetID();
+		locoType = locoBase->GetLocoType();
+		protocol = locoBase->GetProtocol();
+		address = locoBase->GetAddress();
+		serverAddress = locoBase->GetServerAddress();
+		name = locoBase->GetName();
+		newSpeed = locoBase->GetSpeed();
+	}
+	LocoBasePublishSpeed(ControlTypeInternal, controlID, locoID, locoType, protocol, address, serverAddress, name, newSpeed);
+	return true;
 }
 
 /***************************
@@ -1327,7 +1798,7 @@ const map<string,AccessoryConfig> Manager::GetUnmatchedAccessoriesOfControl(cons
 		return out;
 	}
 	out = control->GetUnmatchedAccessories(matchKey);
-	out[""].SetName("");
+	out[""] = AccessoryConfig();
 	return out;
 }
 
@@ -1506,7 +1977,7 @@ void Manager::AccessorySaveAndPublishSettings(const Accessory* const accessory)
 	std::lock_guard<std::mutex> guard(controlMutex);
 	for (auto& control : controls)
 	{
-		control.second->AccessorySettings(accessory->GetID(), accessory->GetName(), accessory->GetMatchKey());
+		control.second->AccessorySettings(accessory->GetID(), accessory->GetName(), accessory->GetPosZ(), accessory->GetMatchKey());
 	}
 }
 
@@ -1857,7 +2328,7 @@ void Manager::FeedbackSaveAndPublishSettings(const Feedback* const feedback)
 	std::lock_guard<std::mutex> guard(controlMutex);
 	for (auto& control : controls)
 	{
-		control.second->FeedbackSettings(feedback->GetID(), feedback->GetName());
+		control.second->FeedbackSettings(feedback->GetID(), feedback->GetName(), feedback->GetPosZ());
 	}
 }
 
@@ -2212,7 +2683,7 @@ void Manager::TrackSaveAndPublishSettings(const Track* const track)
 	std::lock_guard<std::mutex> guard(controlMutex);
 	for (auto& control : controls)
 	{
-		control.second->TrackSettings(track->GetID(), track->GetName());
+		control.second->TrackSettings(track->GetID(), track->GetName(), track->GetPosZ());
 	}
 }
 
@@ -2479,7 +2950,7 @@ void Manager::SwitchSaveAndPublishSettings(const Switch* const mySwitch)
 	std::lock_guard<std::mutex> guard(controlMutex);
 	for (auto& control : controls)
 	{
-		control.second->SwitchSettings(mySwitch->GetID(), mySwitch->GetName(), mySwitch->GetMatchKey());
+		control.second->SwitchSettings(mySwitch->GetID(), mySwitch->GetName(), mySwitch->GetPosZ(),  mySwitch->GetMatchKey());
 	}
 }
 
@@ -2601,7 +3072,8 @@ void Manager::RouteExecuteAsync(Logger::Logger* logger, const RouteID routeID)
 	{
 		return;
 	}
-	__attribute__((unused)) auto r = std::async(std::launch::async, Route::ExecuteStatic, logger, route);
+	std::thread t(Route::ExecuteStatic, logger, route);
+	t.detach();
 }
 
 string Manager::GetRouteList() const
@@ -2817,7 +3289,7 @@ void Manager::RouteSaveAndPublishSettings(const Route* const route)
 	std::lock_guard<std::mutex> guard(controlMutex);
 	for (auto& control : controls)
 	{
-		control.second->RouteSettings(route->GetID(), route->GetName());
+		control.second->RouteSettings(route->GetID(), route->GetName(), route->GetPosZ());
 	}
 }
 
@@ -3327,7 +3799,7 @@ void Manager::SignalSaveAndPublishSettings(const Signal* const signal)
 	std::lock_guard<std::mutex> guard(controlMutex);
 	for (auto& control : controls)
 	{
-		control.second->SignalSettings(signal->GetID(), signal->GetName(), signal->GetMatchKey());
+		control.second->SignalSettings(signal->GetID(), signal->GetName(), signal->GetPosZ(), signal->GetMatchKey());
 	}
 }
 
@@ -3681,7 +4153,7 @@ void Manager::TextSaveAndPublishSettings(const Text* const text)
 	std::lock_guard<std::mutex> guard(controlMutex);
 	for (auto& control : controls)
 	{
-		control.second->TextSettings(text->GetID(), text->GetName());
+		control.second->TextSettings(text->GetID(), text->GetName(), text->GetPosZ());
 	}
 }
 
@@ -3850,7 +4322,7 @@ void Manager::CounterSaveAndPublishSettings(const Counter* const counter)
 	std::lock_guard<std::mutex> guard(controlMutex);
 	for (auto& control : controls)
 	{
-		control.second->CounterSettings(counter->GetID(), counter->GetName());
+		control.second->CounterSettings(counter->GetID(), counter->GetName(), counter->GetPosZ());
 	}
 }
 
@@ -3927,7 +4399,8 @@ bool Manager::LocoBaseIntoTrack(Logger::Logger* logger, const ObjectIdentifier& 
 		return false;
 	}
 
-	LocoBase* locoBase = GetLocoBase(locoBaseIdentifier);
+	// FIXME: mutex is missing!
+	LocoBase* locoBase = GetLocoBaseInternal(locoBaseIdentifier);
 	if (!locoBase)
 	{
 		return false;
@@ -3964,39 +4437,59 @@ bool Manager::LocoBaseIntoTrack(Logger::Logger* logger, const ObjectIdentifier& 
 
 bool Manager::LocoRelease(const LocoID locoID)
 {
-	Loco* loco = GetLoco(locoID);
-	if (!loco)
+	const ObjectIdentifier locoIdentifier(ObjectTypeLoco, locoID);
+	LocoBaseSpeed(ControlTypeInternal, locoIdentifier, MinSpeed);
+	string locoName;
 	{
-		return false;
+		std::lock_guard<std::mutex> guard(locoMutex);
+		Loco* loco = GetLocoInternal(locoID);
+		if (!loco)
+		{
+			return false;
+		}
+
+		const bool released = loco->Release();
+		if (!released)
+		{
+			return false;
+		}
+		locoName = loco->GetName();
 	}
-	return LocoBaseReleaseInternal(loco);
+	LocoBasePublishRelease(locoIdentifier, locoName);
+	return true;
 }
 
 bool Manager::MultipleUnitRelease(const MultipleUnitID multipleUnitID)
 {
-	MultipleUnit* multipleUnit = GetMultipleUnit(multipleUnitID);
-	if (!multipleUnit)
+	const ObjectIdentifier multipleUnitIdentifier(ObjectTypeMultipleUnit, multipleUnitID);
+	LocoBaseSpeed(ControlTypeInternal, multipleUnitIdentifier, MinSpeed);
+	string multipleUnitName;
 	{
-		return false;
+		std::lock_guard<std::mutex> guard(multipleUnitMutex);
+		MultipleUnit* multipleUnit = GetMultipleUnitInternal(multipleUnitID);
+		if (!multipleUnit)
+		{
+			return false;
+		}
+		const bool released = multipleUnit->Release();
+		if (!released)
+		{
+			return false;
+		}
+		multipleUnitName = multipleUnit->GetName();
 	}
-	return LocoBaseReleaseInternal(multipleUnit);
+	LocoBasePublishRelease(multipleUnitIdentifier, multipleUnitName);
+	return true;
 }
 
-bool Manager::LocoBaseReleaseInternal(LocoBase* locoBase)
+void Manager::LocoBasePublishRelease(const ObjectIdentifier& locoIdentifier,
+	const string& locoName)
 {
-	LocoBaseSpeed(ControlTypeInternal, locoBase, MinSpeed);
-
-	bool ret = locoBase->Release();
-	if (!ret)
-	{
-		return false;
-	}
 	std::lock_guard<std::mutex> guard(controlMutex);
 	for (auto& control : controls)
 	{
-		control.second->LocoBaseRelease(locoBase);
+		control.second->LocoBaseRelease(locoIdentifier, locoName);
 	}
-	return true;
 }
 
 bool Manager::TrackRelease(const TrackID trackID)
@@ -4018,12 +4511,20 @@ bool Manager::LocoBaseReleaseOnTrack(const TrackID trackID)
 	}
 	const ObjectIdentifier locoBaseIdentifier = track->GetLocoBase();
 	track->ReleaseForce(logger, locoBaseIdentifier);
-	LocoBase* locoBase = GetLocoBase(locoBaseIdentifier);
-	if (!locoBase)
+
+	const ObjectType type = locoBaseIdentifier.GetObjectType();
+	const ObjectID id = locoBaseIdentifier.GetObjectID();
+	switch (type)
 	{
-		return false;
+		case ObjectTypeLoco:
+			return LocoRelease(id);
+
+		case ObjectTypeMultipleUnit:
+			return MultipleUnitRelease(id);
+
+		default:
+			return false;
 	}
-	return LocoBaseReleaseInternal(locoBase);
 }
 
 bool Manager::TrackStartLocoBase(const TrackID trackID)
@@ -4094,34 +4595,52 @@ bool Manager::RouteRelease(const RouteID routeID)
 	return route->Release(logger, route->GetLocoBase());
 }
 
-bool Manager::LocoDestinationReached(const LocoBase* loco,
-	const Route* route,
-	const Track* track)
+bool Manager::LocoDestinationReached(const ObjectIdentifier& locoIdentifier,
+	const string& locoName,
+	const RouteID routeID,
+	const string& routeName,
+	const TrackID trackID,
+	const string& trackName)
 {
 	std::lock_guard<std::mutex> guard(controlMutex);
 	for (auto& control : controls)
 	{
-		control.second->LocoBaseDestinationReached(loco, route, track);
+		control.second->LocoBaseDestinationReached(locoIdentifier, locoName, routeID, routeName, trackID, trackName);
 	}
 	return true;
 }
 
 bool Manager::LocoBaseStart(const ObjectIdentifier& locoBaseIdentifier)
 {
-	LocoBase* locoBase = GetLocoBase(locoBaseIdentifier);
-	if (!locoBase)
+	const ObjectType type = locoBaseIdentifier.GetObjectType();
+	string locoName;
+	std::mutex& mutex = (type == ObjectTypeLoco ? locoMutex : multipleUnitMutex);
 	{
-		return false;
-	}
-	bool ret = locoBase->GoToAutoMode();
-	if (!ret)
-	{
-		return false;
+		LocoBase* locoBase = nullptr;
+		std::lock_guard<std::mutex> guard(mutex);
+		if (type == ObjectTypeLoco)
+		{
+			locoBase = GetLocoInternal(locoBaseIdentifier.GetObjectID());
+		}
+		else
+		{
+			locoBase = GetMultipleUnitInternal(locoBaseIdentifier.GetObjectID());
+		}
+		if (!locoBase)
+		{
+			return false;
+		}
+		bool ret = locoBase->GoToAutoMode();
+		if (!ret)
+		{
+			return false;
+		}
+		locoName = locoBase->GetName();
 	}
 	std::lock_guard<std::mutex> guard(controlMutex);
 	for (auto& control : controls)
 	{
-		control.second->LocoBaseStart(locoBase);
+		control.second->LocoBaseStart(locoBaseIdentifier, locoName);
 	}
 	return true;
 }
@@ -4157,24 +4676,49 @@ bool Manager::LocoBaseStartAll()
 
 bool Manager::LocoBaseStop(const ObjectIdentifier& locoBaseIdentifier)
 {
-	LocoBase* locoBase = GetLocoBase(locoBaseIdentifier);
-	if (!locoBase)
+	const ObjectType type = locoBaseIdentifier.GetObjectType();
+	string locoName;
+	bool stopRequested = false;
+	std::mutex& mutex = (type == ObjectTypeLoco ? locoMutex : multipleUnitMutex);
+	while (true)
 	{
-		return false;
-	}
-	if (locoBase->IsInManualMode())
-	{
-		return true;
-	}
-	locoBase->RequestManualMode();
-	while (!locoBase->GoToManualMode())
-	{
+		LocoBase* locoBase = nullptr;
+		{
+			std::lock_guard<std::mutex> guard(mutex);
+			if (type == ObjectTypeLoco)
+			{
+				locoBase = GetLocoInternal(locoBaseIdentifier.GetObjectID());
+			}
+			else
+			{
+				locoBase = GetMultipleUnitInternal(locoBaseIdentifier.GetObjectID());
+			}
+			if (!locoBase)
+			{
+				return false;
+			}
+			if (locoBase->IsInManualMode())
+			{
+				return true;
+			}
+			if (!stopRequested)
+			{
+				locoBase->RequestManualMode();
+				locoName = locoBase->GetName();
+			}
+			if (locoBase->GoToManualMode())
+			{
+				break;
+			}
+		}
+
 		Utils::Utils::SleepForSeconds(1);
 	}
+
 	std::lock_guard<std::mutex> guard(controlMutex);
 	for (auto& control : controls)
 	{
-		control.second->LocoBaseStop(locoBase);
+		control.second->LocoBaseStop(locoBaseIdentifier, locoName);
 	}
 	return true;
 }
@@ -4183,24 +4727,26 @@ bool Manager::LocoBaseStopAll()
 {
 	{
 		std::lock_guard<std::mutex> guard(multipleUnitMutex);
-		for (auto& multipleUnit : multipleUnits)
+		for (auto& m : multipleUnits)
 		{
-			if (multipleUnit.second->IsInManualMode())
+			MultipleUnit* multipleUnit = m.second;
+			if (multipleUnit->IsInManualMode())
 			{
 				continue;
 			}
-			multipleUnit.second->RequestManualMode();
+			multipleUnit->RequestManualMode();
 		}
 	}
 	{
 		std::lock_guard<std::mutex> guard(locoMutex);
-		for (auto& loco : locos)
+		for (auto& l : locos)
 		{
-			if (!loco.second->IsInManualMode())
+			Loco* loco = l.second;
+			if (!loco->IsInManualMode())
 			{
 				continue;
 			}
-			loco.second->RequestManualMode();
+			loco->RequestManualMode();
 		}
 	}
 	bool anyLocosInAutoMode = true;
@@ -4210,93 +4756,126 @@ bool Manager::LocoBaseStopAll()
 		anyLocosInAutoMode = false;
 		{
 			std::lock_guard<std::mutex> guard(multipleUnitMutex);
-			for (auto& multipleUnit : multipleUnits)
+			for (auto& m : multipleUnits)
 			{
-				if (multipleUnit.second->IsInManualMode())
+				MultipleUnit* multipleUnit = m.second;
+				if (multipleUnit->IsInManualMode())
 				{
 					continue;
 				}
-				const bool multipleUnitInManualMode = multipleUnit.second->GoToManualMode();
+				const bool multipleUnitInManualMode = multipleUnit->GoToManualMode();
 				if (!multipleUnitInManualMode)
 				{
-					multipleUnit.second->RequestManualMode();
+					multipleUnit->RequestManualMode();
 				}
 				anyLocosInAutoMode |= !multipleUnitInManualMode;
 			}
 		}
 		{
 			std::lock_guard<std::mutex> guard(locoMutex);
-			for (auto& loco : locos)
+			for (auto& l : locos)
 			{
-				if (loco.second->IsInManualMode())
+				Loco* loco = l.second;
+				if (loco->IsInManualMode())
 				{
 					continue;
 				}
-				const bool locoInManualMode = loco.second->GoToManualMode();
+				const bool locoInManualMode = loco->GoToManualMode();
 				if (!locoInManualMode)
 				{
-					loco.second->RequestManualMode();
+					loco->RequestManualMode();
 				}
 				anyLocosInAutoMode |= !locoInManualMode;
 			}
 		}
 	}
 
-	for (auto& multipleUnit : multipleUnits)
+	// FIXME: why no mutex?
+	for (auto& m : multipleUnits)
 	{
-		if (multipleUnit.second->IsInManualMode())
+		MultipleUnit* multipleUnit = m.second;
+		if (multipleUnit->IsInManualMode())
 		{
 			continue;
 		}
-		multipleUnit.second->GetLogger()->Info(Languages::Languages::TextReleasingMultipleUnit);
-		multipleUnit.second->Release();
+		multipleUnit->GetLogger()->Info(Languages::Languages::TextReleasingMultipleUnit);
+		multipleUnit->Release();
 	}
-	for (auto& loco : locos)
+
+	// FIXME: why no mutex?
+	for (auto& l : locos)
 	{
-		if (loco.second->IsInManualMode())
+		Loco* loco = l.second;
+		if (loco->IsInManualMode())
 		{
 			continue;
 		}
-		loco.second->GetLogger()->Info(Languages::Languages::TextReleasingLoco);
-		loco.second->Release();
+		loco->GetLogger()->Info(Languages::Languages::TextReleasingLoco);
+		loco->Release();
 	}
+	logger->Info(Languages::Languages::TextAllLocosInManualMode);
 	return true;
 }
 
-void Manager::LocoBaseStopAllImmediately(const ControlType controlType)
+void Manager::LocoBaseStopAllImmediately(__attribute__((unused)) const ControlType controlType)
 {
 	{
 		std::lock_guard<std::mutex> guard(locoMutex);
 		for (auto& loco : locos)
 		{
-			LocoBaseSpeed(controlType, loco.second, MinSpeed);
+			LocoBaseSpeedInternal(loco.second, MinSpeed);
 		}
 	}
 	{
 		std::lock_guard<std::mutex> guard(multipleUnitMutex);
 		for (auto& multipleUnit : multipleUnits)
 		{
-			LocoBaseSpeed(controlType, multipleUnit.second, MinSpeed);
+			LocoBaseSpeedInternal(multipleUnit.second, MinSpeed);
 		}
 	}
+	// FIXME: publishing is missing
 }
 
 bool Manager::LocoBaseAddTimeTable(const ObjectIdentifier& locoBaseIdentifier,
 	const RouteID routeID,
 	const bool automode)
 {
-	LocoBase* locoBase = GetLocoBase(locoBaseIdentifier);
-	if (!locoBase)
-	{
-		return false;
-	}
+	const RouteID followUpRoute = automode ? RouteAuto : RouteStop;
 	Route* route = GetRoute(routeID);
 	if (!route)
 	{
 		return false;
 	}
-	locoBase->AddTimeTable(route, automode ? RouteAuto : RouteStop);
-	return true;
+
+	const ObjectType type = locoBaseIdentifier.GetObjectType();
+	switch (type)
+	{
+		case ObjectTypeLoco:
+		{
+			std::lock_guard<std::mutex> guard(locoMutex);
+			Loco* loco = GetLocoInternal(locoBaseIdentifier.GetObjectID());
+			if (!loco)
+			{
+				return false;
+			}
+			loco->AddTimeTable(route, followUpRoute);
+			return true;
+		}
+
+		case ObjectTypeMultipleUnit:
+		{
+			std::lock_guard<std::mutex> guard(multipleUnitMutex);
+			MultipleUnit* multipleUnit = GetMultipleUnitInternal(locoBaseIdentifier.GetObjectID());
+			if (!multipleUnit)
+			{
+				return false;
+			}
+			multipleUnit->AddTimeTable(route, followUpRoute);
+			return true;
+		}
+		default:
+			return false;
+	}
 }
 
 string Manager::GetCs2Lokomotive() const
@@ -4994,9 +5573,8 @@ void Manager::ControlCheckerWorker()
 }
 
 template<class ID, class T>
-T* Manager::CreateAndAddObject(std::map<ID,T*>& objects, std::mutex& mutex)
+T* Manager::CreateAndAddObject(std::map<ID,T*>& objects)
 {
-	std::lock_guard<std::mutex> Guard(mutex);
 	ID newObjectID = 0;
 	for (auto& object : objects)
 	{
@@ -5207,7 +5785,7 @@ bool Manager::LayoutItemNewPosition(const DataModel::ObjectIdentifier& identifie
 	}
 }
 
-ObjectIdentifier Manager::GetIdentifierOfServerLocoAddress(const Address serverAddress) const
+LocoConfig Manager::GetLocoOfServerAddress(const Address serverAddress) const
 {
 	{
 		std::lock_guard<std::mutex> guard(locoMutex);
@@ -5215,7 +5793,7 @@ ObjectIdentifier Manager::GetIdentifierOfServerLocoAddress(const Address serverA
 		{
 			if (loco.second->GetServerAddress() == serverAddress)
 			{
-				return ObjectIdentifier(ObjectTypeLoco, loco.second->GetID());
+				return LocoConfig(*(loco.second));
 			}
 		}
 	}
@@ -5226,14 +5804,15 @@ ObjectIdentifier Manager::GetIdentifierOfServerLocoAddress(const Address serverA
 		{
 			if (multipleUnit.second->GetServerAddress() == serverAddress)
 			{
-				return ObjectIdentifier(ObjectTypeMultipleUnit, multipleUnit.second->GetID());
+				return LocoConfig(*(multipleUnit.second));
 			}
 		}
 	}
 
-	return ObjectIdentifier(ObjectTypeNone, ObjectNone);
+	return LocoConfig(LocoTypeNone);
 }
 
+// FIXME: replace with DataModel::AccessoryConfig GetAccessoryOfServerAddress(const Address serverAddress) const;
 ObjectIdentifier Manager::GetIdentifierOfServerAccessoryAddress(const Address serverAddress) const
 {
 	{

@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -24,7 +24,9 @@ along with RailControl; see the file LICENCE. If not see
 #include "Hardware/Protocols/Z21.h"
 #include "Manager.h"
 #include "Server/Z21/Z21Client.h"
+#include "Server/Z21/Z21Server.h"
 
+using DataModel::LocoConfig;
 using DataModel::ObjectIdentifier;
 
 namespace Z21Enums = Hardware::Protocols::Z21Enums;
@@ -33,11 +35,13 @@ namespace Server { namespace Z21
 {
 	Z21Client::Z21Client(const unsigned int id,
 		Manager& manager,
+		Z21Server& z21Server,
 		const int serverSocket,
 		const struct sockaddr_storage* clientAddress)
 	:	Network::UdpClient(serverSocket, clientAddress, 60),
 		logger(Logger::Logger::GetLogger("Z21Client # " + std::to_string(id))),
 		manager(manager),
+		z21Server(z21Server),
 		broadCastFlags(Z21Enums::BroadCastFlagNone)
 	{
 		logger->Debug(Languages::TextUdpConnectionEstablished, AddressAsString());
@@ -156,14 +160,10 @@ namespace Server { namespace Z21
 
 			case Z21Enums::XHeaderGetLocoInfo:
 			{
-				const Address address = ParseLocoAddress(buffer + 6);
-				logger->Debug("Address: {0}", address);
-				const DataModel::LocoBase* const locoBase = manager.GetLocoBase(manager.GetIdentifierOfServerLocoAddress(address));
-				if (nullptr == locoBase)
-				{
-					return;
-				}
-				SendLocoInfo(locoBase);
+				const Address serverAddress = ParseLocoAddress(buffer + 6);
+				logger->Debug("Address: {0}", serverAddress);
+				Hardware::Protocols::Z21LocoCacheEntry entry = z21Server.GetLocoCacheEntry(serverAddress);
+				SendLocoInfo(entry, serverAddress);
 				return;
 			}
 
@@ -172,7 +172,7 @@ namespace Server { namespace Z21
 				const Address address = ParseLocoAddress(buffer + 5);
 				logger->Debug("Address: {0}", address);
 				const DataModel::AccessoryBase* const accessoryBase = manager.GetAccessoryBase(manager.GetIdentifierOfServerAccessoryAddress(address));
-				if (nullptr == accessoryBase)
+				if (!accessoryBase)
 				{
 					return;
 				}
@@ -253,7 +253,9 @@ namespace Server { namespace Z21
 
 	void Z21Client::ParseLocoDrive(const unsigned char* buffer)
 	{
-		const ObjectIdentifier locoBaseIdentifier(manager.GetIdentifierOfServerLocoAddress(ParseLocoAddress(buffer + 6)));
+		const Address serverAddress = ParseLocoAddress(buffer + 6);
+		const LocoConfig locoConfig(manager.GetLocoOfServerAddress(serverAddress));
+		const ObjectIdentifier locoBaseIdentifier(locoConfig.GetObjectIdentifier());
 		Speed speed;
 		switch(buffer[5])
 		{
@@ -271,7 +273,7 @@ namespace Server { namespace Z21
 
 			case Z21Enums::DB0LocoFunction:
 			{
-				const DataModel::LocoFunctionNr nr = buffer[8] & 0x3F;
+				const DataModel::LocoFunctionIcon nr = static_cast<DataModel::LocoFunctionIcon>(buffer[8] & 0x3F);
 				const DataModel::LocoFunctionState on = static_cast<DataModel::LocoFunctionState>((buffer[8] >> 6) & 0x01);
 				manager.LocoBaseFunctionState(ControlTypeZ21Server, locoBaseIdentifier, nr, on);
 				return;
@@ -285,50 +287,23 @@ namespace Server { namespace Z21
 		manager.LocoBaseOrientation(ControlTypeZ21Server, locoBaseIdentifier, static_cast<Orientation>(buffer[8] >> 7));
 	}
 
-	void Z21Client::SendLocoInfo(const DataModel::LocoBase* const locoBase)
+	void Z21Client::SendLocoInfo(const Hardware::Protocols::Z21LocoCacheEntry& locoCache,
+		const Address serverAddress)
 	{
-		unsigned char sendBuffer[15] = { 0x0F, 0x00, 0x40, 0x00, 0xEF, 0x00, 0x00, 0x04 };
-		const Address address = locoBase->GetServerAddress();
-		if (address == AddressNone)
+		if (serverAddress == AddressNone)
 		{
 			return;
 		}
-		Utils::Integer::ShortToDataBigEndian(address, sendBuffer + 5);
-		sendBuffer[8] = (locoBase->GetOrientation() << 7) | Hardware::Protocols::Z21::EncodeSpeed128(locoBase->GetSpeed());
-		sendBuffer[9] = ((locoBase->GetFunctionState(0) & 0x01) << 4)
-				| ((locoBase->GetFunctionState(4) & 0x01) << 3)
-				| ((locoBase->GetFunctionState(3) & 0x01) << 2)
-				| ((locoBase->GetFunctionState(2) & 0x01) << 1)
-				| (locoBase->GetFunctionState(1) & 0x01);
-		sendBuffer[10] = ((locoBase->GetFunctionState(12) & 0x01) << 7)
-				| ((locoBase->GetFunctionState(11) & 0x01) << 6)
-				| ((locoBase->GetFunctionState(10) & 0x01) << 5)
-				| ((locoBase->GetFunctionState(9) & 0x01) << 4)
-				| ((locoBase->GetFunctionState(8) & 0x01) << 3)
-				| ((locoBase->GetFunctionState(7) & 0x01) << 2)
-				| ((locoBase->GetFunctionState(6) & 0x01) << 1)
-				| (locoBase->GetFunctionState(5) & 0x01);
-		sendBuffer[11] = ((locoBase->GetFunctionState(20) & 0x01) << 7)
-				| ((locoBase->GetFunctionState(19) & 0x01) << 6)
-				| ((locoBase->GetFunctionState(18) & 0x01) << 5)
-				| ((locoBase->GetFunctionState(17) & 0x01) << 4)
-				| ((locoBase->GetFunctionState(16) & 0x01) << 3)
-				| ((locoBase->GetFunctionState(15) & 0x01) << 2)
-				| ((locoBase->GetFunctionState(14) & 0x01) << 1)
-				| (locoBase->GetFunctionState(12) & 0x01);
-		sendBuffer[12] = ((locoBase->GetFunctionState(28) & 0x01) << 7)
-				| ((locoBase->GetFunctionState(27) & 0x01) << 6)
-				| ((locoBase->GetFunctionState(26) & 0x01) << 5)
-				| ((locoBase->GetFunctionState(25) & 0x01) << 4)
-				| ((locoBase->GetFunctionState(24) & 0x01) << 3)
-				| ((locoBase->GetFunctionState(23) & 0x01) << 2)
-				| ((locoBase->GetFunctionState(22) & 0x01) << 1)
-				| (locoBase->GetFunctionState(21) & 0x01);
-		sendBuffer[13] = ((locoBase->GetFunctionState(31) & 0x01) << 2)
-				| ((locoBase->GetFunctionState(30) & 0x01) << 1)
-				| (locoBase->GetFunctionState(29) & 0x01);
+		unsigned char sendBuffer[15] = { 0x0F, 0x00, 0x40, 0x00, 0xEF, 0x00, 0x00, 0x04 };
+		Utils::Integer::ShortToDataBigEndian(serverAddress, sendBuffer + 5);
+		sendBuffer[8] = (locoCache.orientation << 7) | Hardware::Protocols::Z21::EncodeSpeed128(locoCache.speed);
+		sendBuffer[9] = ((locoCache.functions >> 1) & 0x07) | ((locoCache.functions & 0x01) << 4);
+		sendBuffer[10] = locoCache.functions >> 5;
+		sendBuffer[11] = locoCache.functions >> 13;
+		sendBuffer[12] = locoCache.functions >> 21;
+		sendBuffer[13] = locoCache.functions >> 29;
 		sendBuffer[sizeof(sendBuffer) - 1] = Utils::Utils::CalcXORCheckSum(sendBuffer, sizeof(sendBuffer) - 1);
-		logger->Debug(Languages::Languages::TextSendingLocoInfo, address);
+		logger->Debug(Languages::Languages::TextSendingLocoInfo, serverAddress);
 		Send(sendBuffer, sizeof(sendBuffer));
 	}
 

@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -22,7 +22,6 @@ along with RailControl; see the file LICENCE. If not see
 
 #include <mutex>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include "DataTypes.h"
@@ -128,6 +127,8 @@ namespace DataModel
 				logger = Logger::Logger::GetLogger(name);
 			}
 
+			virtual LocoType GetLocoType() const = 0;
+
 			bool GoToAutoMode();
 
 			void RequestManualMode();
@@ -142,11 +143,9 @@ namespace DataModel
 
 			bool Release();
 
-			void ReleaseRouteAndTrack();
-
 			bool CheckFreeingTrack(const TrackID trackID) const;
 
-			void LocationReached(const FeedbackID feedbackID);
+			Speed LocationReached(const FeedbackID feedbackID);
 
 			virtual void SetSpeed(const Speed speed);
 
@@ -168,9 +167,9 @@ namespace DataModel
 				return functions.GetFunctionStates();
 			}
 
-			inline void GetFunctions(LocoFunctionEntry* out) const
+			inline const LocoFunctions& GetFunctions() const
 			{
-				functions.GetFunctions(out);
+				return functions;
 			}
 
 			inline void ConfigureFunctions(const std::vector<LocoFunctionEntry>& newEntries)
@@ -293,21 +292,19 @@ namespace DataModel
 				return matchKey;
 			}
 
-			DataModel::LocoFunctionNr GetFunctionNumberFromFunctionIcon(const DataModel::LocoFunctionIcon icon) const;
+			inline DataModel::LocoFunctionNr GetFunctionNrFromFunctionIcon(const DataModel::LocoFunctionIcon icon) const
+			{
+				return functions.GetFunctionNrFromFunctionIcon(icon);
+			}
 
-			DataModel::LocoFunctionIcon GetFunctionIcon(const DataModel::LocoFunctionNr nr) const
+			inline DataModel::LocoFunctionIcon GetFunctionIcon(const DataModel::LocoFunctionNr nr) const
 			{
 				return functions.GetFunctionIcon(nr);
 			}
 
-			DataModel::LocoFunctionType GetFunctionType(const DataModel::LocoFunctionNr nr) const
+			inline DataModel::LocoFunctionType GetFunctionType(const DataModel::LocoFunctionNr nr) const
 			{
 				return functions.GetFunctionType(nr);
-			}
-
-			inline LocoID GetLocoIdWithPrefix() const
-			{
-				return GetID() + (GetObjectType() == ObjectTypeMultipleUnit ? MultipleUnitIdPrefix : 0);
 			}
 
 			LocoBase& operator=(const Hardware::LocoCacheEntry& loco);
@@ -362,33 +359,44 @@ namespace DataModel
 
 			bool GoToAutoModeInternal(const LocoState newState);
 
-			Speed GetRouteSpeed(const Route::Speed routeSpeed);
+			Speed GetRouteSpeed(const Route::Speed routeSpeed) const;
 
-			void LocationStopReached(const FeedbackID feedbackID, const Delay stopDelay);
+			Speed LocationStopReached(const FeedbackID feedbackID,
+				const Delay stopDelay);
 
-			void LocationStopReached();
+			Speed LocationStopReached();
 
-			static inline void LocationStopReachedStatic(LocoBase* locoBase, const FeedbackID feedbackID, const Delay stopDelay)
+			static void LocationStopReachedStatic(Manager* manager,
+				LocoBase* locoBase,
+				const FeedbackID feedbackID,
+				const Delay stopDelay);
+
+			Speed LocationCreepReached(const FeedbackID feedbackID,
+				const Delay creepDelay);
+
+			Speed LocationCreepReached();
+
+			static void LocationCreepReachedStatic(Manager* manager,
+				LocoBase* locoBase,
+				const FeedbackID feedbackID,
+				const Delay creepDelay);
+
+			Speed LocationReducedReached(const FeedbackID feedbackID,
+				const Delay reducedDelay);
+
+			Speed LocationReducedReached();
+
+			static void LocationReducedReachedStatic(Manager* manager,
+				LocoBase* locoBase,
+				const FeedbackID feedbackID,
+				const Delay reducedDelay);
+
+			void ReleaseRouteAndTrack();
+
+			static inline void ReleaseRouteAndTrackStatic(LocoBase* locoBase)
 			{
-				locoBase->LocationStopReached(feedbackID, stopDelay);
-			}
-
-			void LocationCreepReached(const FeedbackID feedbackID, const Delay creepDelay);
-
-			void LocationCreepReached();
-
-			static inline void LocationCreepReachedStatic(LocoBase* locoBase, const FeedbackID feedbackID, const Delay creepDelay)
-			{
-				locoBase->LocationCreepReached(feedbackID, creepDelay);
-			}
-
-			void LocationReducedReached(const FeedbackID feedbackID, const Delay reducedDelay);
-
-			void LocationReducedReached();
-
-			static inline void LocationReducedReachedStatic(LocoBase* locoBase, const FeedbackID feedbackID, const Delay reducedDelay)
-			{
-				locoBase->LocationReducedReached(feedbackID, reducedDelay);
+				Utils::Utils::SetThreadName("ReleaseRouteAndTrackStatic");
+				locoBase->ReleaseRouteAndTrack();
 			}
 
 			mutable std::mutex stateMutex;

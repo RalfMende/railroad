@@ -1,7 +1,7 @@
 /*
 RailControl - Model Railway Control Software
 
-Copyright (c) 2017-2025 by Teddy / Dominik Mahrer - www.railcontrol.org
+Copyright (c) 2017-2026 by Teddy / Dominik Mahrer - www.railcontrol.org
 
 RailControl is free software; you can redistribute it and/or modify it
 under the terms of the GNU General Public License as published by the
@@ -32,27 +32,27 @@ namespace Utils
 	{
 		char buffer[40] = { 0 };
 		unsigned short port = 0;
-	    switch(sockaddr->ss_family) {
-	        case AF_INET:
-	        {
-	        	const struct sockaddr_in* sa4 = reinterpret_cast<const struct sockaddr_in*>(sockaddr);
-	            inet_ntop(AF_INET, &(sa4->sin_addr), buffer, sizeof(buffer));
-	            port = ntohs(sa4->sin_port);
-	            break;
-	        }
+		switch(sockaddr->ss_family) {
+			case AF_INET:
+			{
+				const struct sockaddr_in* sa4 = reinterpret_cast<const struct sockaddr_in*>(sockaddr);
+				inet_ntop(AF_INET, &(sa4->sin_addr), buffer, sizeof(buffer));
+				port = ntohs(sa4->sin_port);
+				break;
+			}
 
-	        case AF_INET6:
-	        {
-	        	const struct sockaddr_in6* sa6 = reinterpret_cast<const struct sockaddr_in6*>(sockaddr);
-	            inet_ntop(AF_INET6, &(sa6->sin6_addr), buffer, sizeof(buffer));
-	            port = ntohs(sa6->sin6_port);
-	            break;
-	        }
+			case AF_INET6:
+			{
+				const struct sockaddr_in6* sa6 = reinterpret_cast<const struct sockaddr_in6*>(sockaddr);
+				inet_ntop(AF_INET6, &(sa6->sin6_addr), buffer, sizeof(buffer));
+				port = ntohs(sa6->sin6_port);
+				break;
+			}
 
-	        default:
-	            break;
-	    }
-	    return string("[") + string(buffer) + string("]:") + std::to_string(port);
+			default:
+				break;
+		}
+		return string("[") + string(buffer) + string("]:") + std::to_string(port);
 	}
 
 	bool Network::CompareAddresses(const struct sockaddr_storage *address1, const struct sockaddr_storage *address2)
