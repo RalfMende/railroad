@@ -21,6 +21,10 @@
 #define windowBits	15
 #define GZIP_ENCODING	16
 
+/* upper bound for announced config stream sizes - real config files are a few
+   KB; this guards against corrupt frames requesting huge allocations */
+#define MAX_CONFIG_STREAM_SIZE	(4 * 1024 * 1024)
+
 unsigned char GETCONFIG_RESPONSE[]    = { 0x00, 0x42, 0x03, 0x00, 0x06 };
 unsigned char GETCONFIG_RESPONSE_II[] = { 0x00, 0x42, 0x03, 0x00, 0x07 };
 
@@ -371,11 +375,42 @@ int config_write(struct cs2_config_data_t *config_data) {
 	printf("\n  writing to %s - size 0x%04x crc exp 0x%04x calc 0x%04x\n", config_data->name,
 	       config_data->deflated_stream_size, config_data->crc, crc);
 
+    if (crc != config_data->crc) {
+	fprintf(stderr, "\n%s: CRC mismatch for %s - expected 0x%04x calculated 0x%04x, not writing file\n",
+		__func__, config_data->name, config_data->crc, crc);
+	syslog(LOG_ERR, "%s: CRC mismatch for %s - expected 0x%04x calculated 0x%04x, not writing file\n",
+	       __func__, config_data->name, config_data->crc, crc);
+	free(filename);
+	free(config_data->deflated_data);
+	config_data->deflated_data = NULL;
+	free(config_data->inflated_data);
+	config_data->inflated_data = NULL;
+	return 0;
+    }
+
+    i = inflate_data(config_data);
+    if (config_data->verbose)
+	printf("inflate returned code %i\n", i);
+    if (i != 0) {
+	fprintf(stderr, "\n%s: inflate failed for %s - error %d, not writing file\n", __func__, config_data->name, i);
+	syslog(LOG_ERR, "%s: inflate failed for %s - error %d, not writing file\n", __func__, config_data->name, i);
+	free(filename);
+	free(config_data->deflated_data);
+	config_data->deflated_data = NULL;
+	free(config_data->inflated_data);
+	config_data->inflated_data = NULL;
+	return 0;
+    }
+
     config_fp = fopen(filename, "wb");
     if (!config_fp) {
 	fprintf(stderr, "\ncan't open file %s for writing - error: %s\n", filename, strerror(errno));
 	syslog(LOG_ERR, "%s: can't open file %s for writing - error: %s\n", __func__, filename, strerror(errno));
 	free(filename);
+	free(config_data->deflated_data);
+	config_data->deflated_data = NULL;
+	free(config_data->inflated_data);
+	config_data->inflated_data = NULL;
 	return 0;
     } else if (config_data->verbose) {
 	for (i = 0; i < config_data->deflated_stream_size; i++) {
@@ -385,9 +420,6 @@ int config_write(struct cs2_config_data_t *config_data) {
 	}
 	printf("\n");
     }
-    i = inflate_data(config_data);
-    if (config_data->verbose)
-	printf("inflate returned code %i\n", i);
     fwrite(config_data->inflated_data, 1, config_data->inflated_size, config_fp);
     fclose(config_fp);
     free(filename);
@@ -415,6 +447,15 @@ int reassemble_data(struct cs2_config_data_t *config_data, unsigned char *netfra
 	if (config_data->verbose)
 	    printf("\nstart of config - deflated size: 0x%08x crc 0x%04x\n", config_data->deflated_size, config_data->crc);
 
+	if (config_data->deflated_size > MAX_CONFIG_STREAM_SIZE) {
+	    syslog(LOG_ERR, "%s: abort config data stream - announced deflated size 0x%08x exceeds limit\n",
+		   __func__, config_data->deflated_size);
+	    config_data->start = 0;
+	    config_data->stream = 0;
+	    config_data->state = CS2_STATE_INACTIVE;
+	    return 0;
+	}
+
 	config_data->start = 1;
 	/* we alloc 8 bytes more to be sure that it fits */
 	config_data->deflated_data = realloc(config_data->deflated_data, config_data->deflated_size + 16);
@@ -429,6 +470,16 @@ int reassemble_data(struct cs2_config_data_t *config_data, unsigned char *netfra
 	if (config_data->start) {
 	    memcpy(&temp, &netframe[5], 4);
 	    config_data->inflated_size = ntohl(temp);
+	    if (config_data->inflated_size > MAX_CONFIG_STREAM_SIZE) {
+		syslog(LOG_ERR, "%s: abort config data stream - announced inflated size 0x%08x exceeds limit\n",
+		       __func__, config_data->inflated_size);
+		config_data->start = 0;
+		config_data->stream = 0;
+		config_data->state = CS2_STATE_INACTIVE;
+		free(config_data->deflated_data);
+		config_data->deflated_data = NULL;
+		return 0;
+	    }
 	    config_data->inflated_data = realloc(config_data->inflated_data, config_data->inflated_size);
 	    if (config_data->inflated_data == NULL) {
 		fprintf(stderr, "can't malloc inflated config data buffer - size 0x%04x\n", config_data->inflated_size);
@@ -440,6 +491,17 @@ int reassemble_data(struct cs2_config_data_t *config_data, unsigned char *netfra
 	    config_data->ddi = 8;
 	    config_data->deflated_size_counter -= 8;
 	} else if (config_data->stream) {
+	    if (config_data->ddi + 8 > config_data->deflated_size + 16) {
+		syslog(LOG_ERR, "%s: abort config data stream - received more data than announced\n", __func__);
+		config_data->start = 0;
+		config_data->stream = 0;
+		config_data->state = CS2_STATE_INACTIVE;
+		free(config_data->deflated_data);
+		config_data->deflated_data = NULL;
+		free(config_data->inflated_data);
+		config_data->inflated_data = NULL;
+		return 0;
+	    }
 	    memcpy(&config_data->deflated_data[config_data->ddi], &netframe[5], 8);
 	    config_data->ddi += 8;
 	    if (config_data->deflated_size_counter <= 8) {
