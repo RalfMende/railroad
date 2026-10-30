@@ -188,8 +188,8 @@ void emit_change_broadcast(struct can_frame frame, int *tcp_socket_list, int snm
 
     uint8_t fill = frame.can_id & 0xFF;
     strncpy(config_name, (char *)frame.data, 8);
-    syslog(LOG_NOTICE, "%s: config request >%s<\n", __func__, config_name);
     config_name[8] = '\0';
+    syslog(LOG_NOTICE, "%s: config request >%s<\n", __func__, config_name);
     send_tcp_config_data(config_name, config_dir, frame.can_id, tcp_socket_list, snmbr, CRC | COMPRESSED | BCCHANGE, fill);
 }
 
@@ -319,8 +319,8 @@ int check_data(int tcp_socket, struct cs2_config_data_t *cs2_config_data, unsign
 	    cs2_config_data->cs2_config_copy = 1;
 	} else {
 	    strncpy(config_name, (char *)&netframe[5], 8);
-	    syslog(LOG_NOTICE, "%s: config request >%s<\n", __func__, config_name);
 	    config_name[8] = '\0';
+	    syslog(LOG_NOTICE, "%s: config request >%s<\n", __func__, config_name);
 	    if (cs2_config_data->verbose)
 		printf("%s ID 0x%08x %s\n", __func__, canid, (char *)&netframe[5]);
 	    netframe[1] |= 1;
@@ -339,14 +339,10 @@ int check_data(int tcp_socket, struct cs2_config_data_t *cs2_config_data, unsign
 		int page_number;
 		ret = 1;
 		page_number = atoi(&config_name[4]);
-		strcat(gbs_name, "gleisbilder/");
-		if (page_number <= MAX_TRACK_PAGE) {
-		    if (page_name[page_number]) {
-			strcat(gbs_name, page_name[page_number]);
-			syslog(LOG_NOTICE, "%s: sending %s\n", __func__, gbs_name);
-			send_tcp_config_data(gbs_name, config_dir, canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
-			break;
-		    }
+		if ((page_number >= 0) && (page_number < MAX_TRACK_PAGE) && page_name[page_number]) {
+		    syslog(LOG_NOTICE, "%s: sending %s\n", __func__, gbs_name);
+		    send_tcp_config_data(gbs_name, config_dir, canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
+		    break;
 		}
 		syslog(LOG_NOTICE, "%s: cant't send gbs-%d\n", __func__, page_number);
 		break;
