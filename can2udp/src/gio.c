@@ -532,6 +532,19 @@ int reassemble_data(struct cs2_config_data_t *config_data, unsigned char *netfra
 		config_data->deflated_size_counter -= 8;
 	    }
 	}
+    } else if ((config_data->start || config_data->stream) &&
+	       (netframe[4] != 6) && (netframe[4] != 7) && (netframe[4] != 8)) {
+	/* spec: only DLC 6/7 (stream start) and 8 (data) are valid - any other
+	   DLC within a config data stream aborts the reception */
+	syslog(LOG_ERR, "%s: abort config data stream - unexpected DLC %d\n", __func__, netframe[4]);
+	config_data->start = 0;
+	config_data->stream = 0;
+	config_data->state = CS2_STATE_INACTIVE;
+	free(config_data->deflated_data);
+	config_data->deflated_data = NULL;
+	free(config_data->inflated_data);
+	config_data->inflated_data = NULL;
+	return 0;
     }
     return 1;
 }
