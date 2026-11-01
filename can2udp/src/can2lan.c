@@ -85,6 +85,59 @@ unsigned char ec_frame[13];
 
 struct filter_t filter[2];
 
+/* pending (incomplete) frame bytes of one TCP connection */
+struct tcp_rx_buf {
+    uint8_t data[CAN_ENCAP_SIZE];
+    uint8_t len;
+};
+
+static void tcp_rx_reset(struct tcp_rx_buf *rx) {
+    rx->len = 0;
+}
+
+/*
+ * TCP is a byte stream and does not preserve packet boundaries: a read()
+ * may return a partial 13-byte CAN frame or several frames at once.
+ * Append received data to the per-connection reassembly buffer and copy
+ * every complete 13-byte frame into frames (max_frames capacity).
+ * Returns the number of complete frames. Bytes of an incomplete trailing
+ * frame stay pending in rx until the next call.
+ */
+static int tcp_rx_feed(struct tcp_rx_buf *rx, const uint8_t *data, size_t len, uint8_t *frames, int max_frames) {
+    size_t pos = 0;
+    int count = 0;
+
+    while (pos < len) {
+	if (rx->len) {
+	    /* complete the pending frame first */
+	    size_t need = CAN_ENCAP_SIZE - rx->len;
+	    size_t take = (need < len - pos) ? need : len - pos;
+	    memcpy(&rx->data[rx->len], &data[pos], take);
+	    rx->len += take;
+	    pos += take;
+	    if (rx->len < CAN_ENCAP_SIZE)
+		break;
+	    if (count < max_frames) {
+		memcpy(&frames[count * CAN_ENCAP_SIZE], rx->data, CAN_ENCAP_SIZE);
+		count++;
+	    }
+	    rx->len = 0;
+	} else if (len - pos >= CAN_ENCAP_SIZE) {
+	    if (count < max_frames) {
+		memcpy(&frames[count * CAN_ENCAP_SIZE], &data[pos], CAN_ENCAP_SIZE);
+		count++;
+	    }
+	    pos += CAN_ENCAP_SIZE;
+	} else {
+	    /* keep the incomplete trailing frame for the next call */
+	    memcpy(rx->data, &data[pos], len - pos);
+	    rx->len = len - pos;
+	    pos = len;
+	}
+    }
+    return count;
+}
+
 void signal_handler(int sig) {
     syslog(LOG_WARNING, "got signal %s\n", strsignal(sig));
     do_loop = 0;
@@ -422,6 +475,9 @@ int main(int argc, char **argv) {
     sigset_t blockset, emptyset;
     struct can_frame frame;
     char timestamp[16];
+    /* per TCP client reassembly buffer for incomplete 13-byte frames */
+    struct tcp_rx_buf tcp_rx[MAX_TCP_CONN];
+    unsigned char tcp_frames[MAXDG + CAN_ENCAP_SIZE];
     /* UDP incoming socket, CAN socket, UDP broadcast socket, TCP socket */
     int sa, sc, sb, st, st2, tcp_socket;
     struct sockaddr_in saddr, baddr, tcp_addr, tcp_addr2;
@@ -705,6 +761,7 @@ int main(int argc, char **argv) {
     max_tcp_i = -1;		/* index into tcp_client[] array */
     memset(tcp_client, -1, sizeof(tcp_client));
     memset(tcp_client2, -1, sizeof(tcp_client2));
+    memset(tcp_rx, 0, sizeof(tcp_rx));
 
     /* prepare second TCP socket */
     st2 = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
@@ -968,31 +1025,30 @@ int main(int argc, char **argv) {
 			printf("%s client %s closed connection\n", timestamp, inet_ntop(AF_INET, &tcp_addr.sin_addr, buffer, sizeof(buffer)));
 		    }
 		    syslog(LOG_NOTICE, "%s: client %s closed connection\n", __func__, inet_ntop(AF_INET, &tcp_addr.sin_addr, buffer, sizeof(buffer)));
+		    if (tcp_rx[i].len) {
+			syslog(LOG_NOTICE, "%s: discarding %d bytes of incomplete CAN frame\n", __func__, tcp_rx[i].len);
+			tcp_rx_reset(&tcp_rx[i]);
+		    }
 		    close(tcp_socket);
 		    FD_CLR(tcp_socket, &all_fds);
 		    tcp_client[i] = -1;
 		    tcp_connections--;
+		} else if (n < 0) {
+		    syslog(LOG_ERR, "%s: reading TCP data error: %s\n", __func__, strerror(errno));
 		} else {
-		    /* check the whole TCP packet, if there are more than one CAN frame included */
-		    /* TCP packets with size modulo 13 !=0 are ignored though */
-		    if (n % 13) {
-			time_stamp(timestamp);
-			if (!background)
-			    fprintf(stderr, "%s received packet %% 13 : length %d - maybe close connection\n", timestamp, n);
-			syslog(LOG_ERR, "%s: received packet %% 13 : length %d - maybe close connection\n", __func__, n);
-		    } else {
-			for (j = 0; j < n; j += CAN_ENCAP_SIZE) {
-			    if (!check_data(tcp_socket, &cs2_config_data, &netframe[j])) {
-				ret = frame_to_can(sc, &netframe[j]);
-				if (!ret) {
-				    if (j > 0)
-					print_can_frame(TCP_FORMATS_STRG, &netframe[j], cs2_config_data.verbose && !background);
-				    else
-					print_can_frame(TCP_FORMAT_STRG, &netframe[j], cs2_config_data.verbose && !background);
-				}
-				net_to_net(sb, (struct sockaddr *)&baddr, &netframe[j], CAN_ENCAP_SIZE);
-				print_can_frame(UDP_FORMAT_STRG, &netframe[j], cs2_config_data.verbose && !background);
+		    /* TCP is a byte stream: reassemble complete 13-byte CAN frames per connection */
+		    int nframes = tcp_rx_feed(&tcp_rx[i], netframe, n, tcp_frames, sizeof(tcp_frames) / CAN_ENCAP_SIZE);
+		    for (j = 0; j < nframes; j++) {
+			if (!check_data(tcp_socket, &cs2_config_data, &tcp_frames[j * CAN_ENCAP_SIZE])) {
+			    ret = frame_to_can(sc, &tcp_frames[j * CAN_ENCAP_SIZE]);
+			    if (!ret) {
+				if (j > 0)
+				    print_can_frame(TCP_FORMATS_STRG, &tcp_frames[j * CAN_ENCAP_SIZE], cs2_config_data.verbose && !background);
+				else
+				    print_can_frame(TCP_FORMAT_STRG, &tcp_frames[j * CAN_ENCAP_SIZE], cs2_config_data.verbose && !background);
 			    }
+			    net_to_net(sb, (struct sockaddr *)&baddr, &tcp_frames[j * CAN_ENCAP_SIZE], CAN_ENCAP_SIZE);
+			    print_can_frame(UDP_FORMAT_STRG, &tcp_frames[j * CAN_ENCAP_SIZE], cs2_config_data.verbose && !background);
 			}
 		    }
 		}
