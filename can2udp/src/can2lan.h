@@ -51,6 +51,18 @@
 #define MAX_UDP_BCAST_RETRY  	10		/* maximum retries getting UDP socket */
 #define MAX_TRACK_PAGE		64		/* maximum number track pages */
 #define MAX(a,b)		((a) > (b) ? (a) : (b))
+#define MIN(a,b)		((a) < (b) ? (a) : (b))
+
+/*
+ * Transmit queues (gio.c). Sized for small embedded targets like the Omega2+
+ * (128 MB RAM): the CAN queue is static, TCP client queues are allocated on
+ * demand, start small and are released again when idle.
+ */
+#define CAN_TX_QUEUE_LEN	256		/* CAN frames waiting to be written to the bus */
+#define CAN_TX_RETRY_US		5000		/* retry delay if the CAN interface TX queue is full */
+#define TCP_TX_QUEUE_MIN	512		/* initial send queue size of a TCP client */
+#define TCP_TX_QUEUE_KEEP	4096		/* bigger queues are released when empty */
+#define TCP_TX_QUEUE_MAX	(96 * 1024)	/* hard limit per client, largest config stream is about 54 KB */
 
 #define	CRC			0x01
 #define COMPRESSED		0x02
@@ -142,6 +154,16 @@ void print_can_frame(char *format_string, unsigned char *netframe, int verbose);
 int net_to_net(int net_socket, struct sockaddr *net_addr, unsigned char *netframe, int length);
 int frame_to_can(int can_socket, unsigned char *netframe);
 int frame_to_net(int net_socket, struct sockaddr *net_addr, struct can_frame *frame);
+int tcp_tx_register(int fd);
+void tcp_tx_unregister(int fd);
+void tcp_tx_flush_all(void);
+void tcp_tx_flush_fd(int fd);
+int tcp_tx_fill_wfds(fd_set *wfds);
+int tcp_tx_dead(int fd);
+size_t tcp_tx_pending(int fd);
+int can_tx_enqueue(unsigned char *netframe);
+int can_tx_free(void);
+long can_tx_service(int can_socket);
 void ms1_node_buffer_init(void);
 int ms1_node_buffer_in(uint8_t node);
 int ms1_node_buffer_out(uint8_t *node);

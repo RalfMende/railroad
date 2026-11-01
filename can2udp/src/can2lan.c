@@ -77,7 +77,6 @@ char **page_name;
 char **cs2_page_name;
 int ms1_workaround;
 int cs2fake_ping, pidfd, do_loop = 1;
-struct timeval last_sent;
 
 static const int MAXPENDING = 16;       /* max outstanding tcp connections */
 unsigned char netframe[MAXDG];
@@ -136,6 +135,19 @@ static int tcp_rx_feed(struct tcp_rx_buf *rx, const uint8_t *data, size_t len, u
 	}
     }
     return count;
+}
+
+/* close a TCP client connection and release all per client state */
+static void close_tcp_client(int *client, struct tcp_rx_buf *rx, fd_set *all_fds, unsigned int *connections) {
+    if (rx && rx->len) {
+	syslog(LOG_NOTICE, "%s: discarding %d bytes of incomplete CAN frame\n", __func__, rx->len);
+	tcp_rx_reset(rx);
+    }
+    tcp_tx_unregister(*client);
+    close(*client);
+    FD_CLR(*client, all_fds);
+    *client = -1;
+    (*connections)--;
 }
 
 void signal_handler(int sig) {
@@ -486,7 +498,9 @@ int main(int argc, char **argv) {
     struct ifreq ifr;
     socklen_t caddrlen = sizeof(caddr);
     socklen_t tcp_client_length = sizeof(tcp_addr);
-    fd_set all_fds, read_fds;
+    fd_set all_fds, read_fds, write_fds;
+    int free_slots, rdlen, short_wait;
+    long can_wait;
     int s = 0;
     unsigned int tcp_connections = 0;
     struct timespec ts;
@@ -509,9 +523,6 @@ int main(int argc, char **argv) {
     const int on = 1;
     uint32_t canid;
     char buffer[64];
-
-    /* clear timestamp for last CAN frame sent */
-    memset(&last_sent, 0, sizeof(last_sent));
 
     memset(&filter, 0, sizeof(filter));
 
@@ -852,10 +863,8 @@ int main(int argc, char **argv) {
     sigaction(SIGPIPE, &sigact, NULL);
     sigemptyset(&emptyset);
 
-    /* set select timeout -> send periodic CAN Ping */
-    ts.tv_sec = 1;
-    ts.tv_nsec = 0;
-
+    /* the select() timeout is set in the loop: 1 sec for the periodic CAN Ping,
+       shorter while CAN frames are waiting for their pacing time */
     FD_ZERO(&all_fds);
     FD_SET(sc, &all_fds);
     FD_SET(sa, &all_fds);
@@ -864,18 +873,56 @@ int main(int argc, char **argv) {
     max_fds = MAX(MAX(MAX(sc, sa), st), st2);
 
     while (do_loop) {
-	read_fds = all_fds;
-	nready = pselect(max_fds + 1, &read_fds, NULL, NULL, &ts, &emptyset);
-	if (nready == 0) {
-	    /* send periodic ping */
+	/* send what the clients couldn't take yet, close clients which can't keep up */
+	tcp_tx_flush_all();
+	for (i = 0; i <= max_tcp_i; i++) {
+	    if ((tcp_client[i] >= 0) && tcp_tx_dead(tcp_client[i])) {
+		syslog(LOG_NOTICE, "%s: closing TCP client fd %d - can't keep up with the CAN traffic\n", __func__, tcp_client[i]);
+		close_tcp_client(&tcp_client[i], &tcp_rx[i], &all_fds, &tcp_connections);
+	    }
+	}
+
+	/* write the next CAN frame if its pacing time has elapsed, otherwise wake up in time */
+	can_wait = can_tx_service(sc);
+	if ((can_wait >= 0) && (can_wait < 1000000)) {
+	    ts.tv_sec = 0;
+	    ts.tv_nsec = can_wait * 1000;
+	    short_wait = 1;
+	} else {
 	    ts.tv_sec = 1;
 	    ts.tv_nsec = 0;
+	    short_wait = 0;
+	}
+
+	read_fds = all_fds;
+	FD_ZERO(&write_fds);
+	tcp_tx_fill_wfds(&write_fds);
+	/* back pressure: don't read more than the CAN queue can take. TCP data stays in the
+	   kernel buffer and slows the sender down, UDP is only lost if the kernel buffer overflows */
+	free_slots = can_tx_free();
+	if (free_slots < 1)
+	    FD_CLR(sa, &read_fds);
+	if (free_slots < 2) {
+	    for (i = 0; i <= max_tcp_i; i++) {
+		if (tcp_client[i] >= 0)
+		    FD_CLR(tcp_client[i], &read_fds);
+	    }
+	}
+	/* a read of rdlen bytes yields at most free_slots - 1 complete frames, even with a pending partial frame */
+	rdlen = MIN((free_slots - 1) * CAN_ENCAP_SIZE, MAXDG);
+
+	nready = pselect(max_fds + 1, &read_fds, &write_fds, NULL, &ts, &emptyset);
+	if (nready == 0) {
+	    /* woke up only because the next CAN frame is due */
+	    if (short_wait)
+		continue;
+	    /* send periodic ping */
 	    if (cs2fake_ping)
 		cs2ping_timer++;
 	    if (cs2ping_timer >= PING_TIME) {
 		cs2ping_timer = 0;
 		print_can_frame(UDP_FORMAT_STRG, netframe, cs2_config_data.verbose && !background);
-		if (frame_to_can(sc, M_CAN_PING) < 0) {
+		if (can_tx_enqueue(M_CAN_PING) < 0) {
 		    fprint_syslog(stderr, LOG_ERR, "can't send CAN ping");
 		}
 		for (i = 0; i <= max_tcp_i; i++) {	/* check all clients for data */
@@ -894,15 +941,24 @@ int main(int argc, char **argv) {
 	    continue;
 	}
 
+	/* TCP clients which can take more of their queued data */
+	for (i = 0; i <= max_tcp_i; i++) {
+	    if ((tcp_client[i] >= 0) && FD_ISSET(tcp_client[i], &write_fds)) {
+		tcp_tx_flush_fd(tcp_client[i]);
+		nready--;
+	    }
+	}
+
 	/* received a CAN frame */
 	if (FD_ISSET(sc, &read_fds)) {
 	    /* reading via SockatCAN */
-	    if (read(sc, &frame, sizeof(struct can_frame)) < 0) {
+	    n = read(sc, &frame, sizeof(struct can_frame));
+	    if (n < 0) {
 		fprintf(stderr, "reading CAN frame error: %s\n", strerror(errno));
 		syslog(LOG_ERR, "%s: reading CAN frame error: %s\n", __func__, strerror(errno));
 	    }
-	    /* if CAN Frame is EFF do it */
-	    if (frame.can_id & CAN_EFF_FLAG) {	/* only EFF frames are valid */
+	    /* if CAN Frame is EFF do it - but never forward the previous frame again after a failed read */
+	    if ((n == (int)sizeof(struct can_frame)) && (frame.can_id & CAN_EFF_FLAG)) {	/* only EFF frames are valid */
 		if (((frame.can_id & 0x1FFFF00) == 0x0434700) && (frame.can_dlc == 8)) {
 		    emit_change_broadcast(frame, tcp_client, max_tcp_i + 1);
 		} else {
@@ -938,8 +994,8 @@ int main(int argc, char **argv) {
 		    net_to_net(sb, (struct sockaddr *)&baddr, netframe, CAN_ENCAP_SIZE);
 		    print_can_frame(UDP_UDP_FORMAT_STRG, netframe, cs2_config_data.verbose && !background);
 		} else {
-		    /* send packet on CAN */
-		    ret = frame_to_can(sc, netframe);
+		    /* queue the packet for the CAN bus (the queue has room: sa isn't read when it is full) */
+		    ret = can_tx_enqueue(netframe);
 		    print_can_frame(NET_UDP_FORMAT_STRG, netframe, cs2_config_data.verbose && !background);
 		    check_data_udp(sb, (struct sockaddr *)&baddr, &cs2_config_data, netframe);
 		}
@@ -976,6 +1032,7 @@ int main(int argc, char **argv) {
 		FD_SET(conn_fd, &all_fds);		/* add new descriptor to set */
 		max_fds = MAX(conn_fd, max_fds);	/* for select */
 		max_tcp_i = MAX(i, max_tcp_i);		/* max index in tcp_client[] array */
+		tcp_tx_register(conn_fd);		/* send queue of the new client */
 		/* send embedded CAN ping */
 		memcpy(netframe, M_CAN_PING, CAN_ENCAP_SIZE);
 		net_to_net(conn_fd, NULL, netframe, CAN_ENCAP_SIZE);
@@ -1035,8 +1092,10 @@ int main(int argc, char **argv) {
 		    time_stamp(timestamp);
 		    printf("%s packet from: %s\n", timestamp, inet_ntop(AF_INET, &tcp_addr.sin_addr, buffer, sizeof(buffer)));
 		}
-		n = read(tcp_socket, netframe, MAXDG);
-		if (n <= 0) {
+		n = read(tcp_socket, netframe, rdlen);
+		if ((n < 0) && ((errno == EINTR) || (errno == EAGAIN) || (errno == EWOULDBLOCK))) {
+		    /* nothing to read after all - try again with the next select() */
+		} else if (n <= 0) {
 		    /* connection closed by client or read error (e.g. ECONNRESET) */
 		    if (n < 0)
 			syslog(LOG_ERR, "%s: reading TCP data error: %s\n", __func__, strerror(errno));
@@ -1045,20 +1104,13 @@ int main(int argc, char **argv) {
 			printf("%s client %s closed connection\n", timestamp, inet_ntop(AF_INET, &tcp_addr.sin_addr, buffer, sizeof(buffer)));
 		    }
 		    syslog(LOG_NOTICE, "%s: client %s closed connection\n", __func__, inet_ntop(AF_INET, &tcp_addr.sin_addr, buffer, sizeof(buffer)));
-		    if (tcp_rx[i].len) {
-			syslog(LOG_NOTICE, "%s: discarding %d bytes of incomplete CAN frame\n", __func__, tcp_rx[i].len);
-			tcp_rx_reset(&tcp_rx[i]);
-		    }
-		    close(tcp_socket);
-		    FD_CLR(tcp_socket, &all_fds);
-		    tcp_client[i] = -1;
-		    tcp_connections--;
+		    close_tcp_client(&tcp_client[i], &tcp_rx[i], &all_fds, &tcp_connections);
 		} else {
 		    /* TCP is a byte stream: reassemble complete 13-byte CAN frames per connection */
 		    int nframes = tcp_rx_feed(&tcp_rx[i], netframe, n, tcp_frames, sizeof(tcp_frames) / CAN_ENCAP_SIZE);
 		    for (j = 0; j < nframes; j++) {
 			if (!check_data(tcp_socket, &cs2_config_data, &tcp_frames[j * CAN_ENCAP_SIZE])) {
-			    ret = frame_to_can(sc, &tcp_frames[j * CAN_ENCAP_SIZE]);
+			    ret = can_tx_enqueue(&tcp_frames[j * CAN_ENCAP_SIZE]);
 			    if (!ret) {
 				if (j > 0)
 				    print_can_frame(TCP_FORMATS_STRG, &tcp_frames[j * CAN_ENCAP_SIZE], cs2_config_data.verbose && !background);
@@ -1085,7 +1137,9 @@ int main(int argc, char **argv) {
 		    printf("%s TCP2 socket packet from: %s\n", timestamp, inet_ntop(AF_INET, &tcp_addr2.sin_addr, buffer, sizeof(buffer)));
 		}
 		n = read(tcp_socket, netframe, MAXDG);
-		if (n <= 0) {
+		if ((n < 0) && ((errno == EINTR) || (errno == EAGAIN) || (errno == EWOULDBLOCK))) {
+		    /* nothing to read after all - try again with the next select() */
+		} else if (n <= 0) {
 		    /* connection closed by client or read error (e.g. ECONNRESET) */
 		    if (n < 0)
 			syslog(LOG_ERR, "%s: reading TCP2 data error: %s\n", __func__, strerror(errno));
@@ -1094,10 +1148,7 @@ int main(int argc, char **argv) {
 			printf("%s client %s closed connection\n", timestamp, inet_ntop(AF_INET, &tcp_addr2.sin_addr, buffer, sizeof(buffer)));
 		    }
 		    syslog(LOG_NOTICE, "%s: client %s closed connection\n", __func__, inet_ntop(AF_INET, &tcp_addr2.sin_addr, buffer, sizeof(buffer)));
-		    close(tcp_socket);
-		    FD_CLR(tcp_socket, &all_fds);
-		    tcp_client2[i] = -1;
-		    tcp_connections--;
+		    close_tcp_client(&tcp_client2[i], NULL, &all_fds, &tcp_connections);
 		} else {
 		    decode_ascii_frame(tcp_socket, netframe, n);
 		}
