@@ -48,9 +48,14 @@ STREAM_SET_CMD = 0x00020000
 # from src/can2lan.c main(): S88 events are diverted to TCP clients
 S88_EVENT_MASK = 0x00230000
 
-# from src/can2lan.c check_data(): config stream frames with a hash other
-# than the copy-request hash are not forwarded to CAN
+# from src/can2lan.c check_data(): config stream frames whose hash bits
+# (canid & 0xFCFF) are all zero belong to a CAN member copy request and are
+# NOT forwarded to CAN; all other hashes are forwarded
 COPY_REQUEST_HASH_MASK = 0x0000FCFF
+
+# from src/can2lan.c check_data(): config names answered by can2lan itself
+LOCAL_CONFIG_NAMES = {b"loks", b"mags", b"gbs", b"fs",
+                      b"lokstat", b"magstat", b"gbsstat", b"fsstat"}
 
 # from src/gio.c reassemble_data(): upper bound for announced stream sizes
 MAX_CONFIG_STREAM_SIZE = 4 * 1024 * 1024
@@ -164,20 +169,39 @@ def udp_receive_path(packet, filters=()):
     return ("can", frame_to_can(packet))
 
 
-def check_data(canid, dlc):
+def check_data(frame):
     """Model of the forwarding decision of check_data() in src/can2lan.c.
 
-    Returns True if the frame is consumed locally (not sent to CAN).
-    Only the decision-relevant branches are modelled: config data
-    requests (0x40) and config data streams (0x42).
+    Takes a 13-byte TCP frame and returns (consumed, frame_out):
+    consumed is True if the frame is NOT forwarded to CAN/UDP (ret = 1 in
+    C), frame_out is the frame as it would be forwarded (check_data()
+    modifies the frame in place).
+
+    Modelled branches (verified against the C code):
+    - 0x40 config data request: ack with response bit set in place; the
+      names loks, mags, gbs, gbs-N, fs, lokstat, magstat, gbsstat, fsstat
+      and the copy request 0x0040af7e are answered locally (ret = 1),
+      every other name is forwarded to CAN - with the response bit
+      already set (netframe[1] |= 1 happens before the name lookup).
+    - 0x42 config data stream: ret = 1 only if (canid & 0xFCFF) == 0,
+      i.e. for the copy-request hash 0x0300; every other hash is
+      forwarded to CAN.
+    - everything else (including 0x30/0x31 pings): forwarded.
     """
+    out = bytearray(frame)
+    canid = int.from_bytes(frame[0:4], "big")
     cmd = canid & 0xFFFF0000
     if cmd == 0x00400000:
-        return True  # config data request: answered locally
+        out[1] |= 1
+        if canid == 0x0040AF7E:
+            return True, bytes(out)
+        name = bytes(frame[5:13]).split(b"\x00")[0]
+        if name in LOCAL_CONFIG_NAMES or name.startswith(b"gbs-"):
+            return True, bytes(out)
+        return False, bytes(out)
     if cmd == 0x00420000:
-        # config data stream: only the copy-request hash goes to CAN
-        return bool(canid & COPY_REQUEST_HASH_MASK)
-    return False
+        return (canid & COPY_REQUEST_HASH_MASK) == 0, bytes(out)
+    return False, bytes(out)
 
 
 class ReassembleData:
@@ -517,59 +541,68 @@ class TestUdpReceivePath(unittest.TestCase):
 class TestTcpToCan(unittest.TestCase):
     """TCP -> CAN path: reassembly plus check_data forwarding decision."""
 
+    @staticmethod
+    def _request(name, can_id=0x00401234):
+        return can_id.to_bytes(4, "big") + bytes([8]) + name.ljust(8, b"\x00")
+
     def test_single_frame_goes_to_can(self):
         rx = TcpRxBuf()
         packet = frame_to_net(0x00000100 | CAN_EFF_FLAG, b"\x01", 1)
         frames = rx.feed(packet)
         self.assertEqual(len(frames), 1)
-        can_id = int.from_bytes(frames[0][0:4], "big")
-        self.assertFalse(check_data(can_id, frames[0][4]))
-        self.assertEqual(frame_to_can(frames[0])[0], 0x00000100 | CAN_EFF_FLAG)
+        consumed, out = check_data(frames[0])
+        self.assertFalse(consumed)
+        self.assertEqual(out, frames[0])
+        self.assertEqual(frame_to_can(out)[0], 0x00000100 | CAN_EFF_FLAG)
 
-    def test_config_request_consumed_locally(self):
-        # "loks" request: answered by can2lan, not forwarded to CAN
-        rx = TcpRxBuf()
-        packet = bytes([0x00, 0x40, 0x12, 0x34, 0x08]) + b"loks\x00\x00\x00\x00"
-        frames = rx.feed(packet)
-        can_id = int.from_bytes(frames[0][0:4], "big")
-        self.assertTrue(check_data(can_id, frames[0][4]))
+    def test_known_config_request_consumed_locally(self):
+        for name in (b"loks", b"mags", b"gbs", b"gbs-3", b"fs",
+                     b"lokstat", b"magstat", b"gbsstat", b"fsstat"):
+            consumed, _ = check_data(self._request(name))
+            self.assertTrue(consumed, name)
 
-    def test_config_stream_with_hash_consumed_locally(self):
-        # hash 0x0301: canid & 0x0000fcff != 0 -> consumed locally
-        rx = TcpRxBuf()
-        packet = bytes([0x00, 0x42, 0x03, 0x01, 0x06]) + bytes(8)
-        frames = rx.feed(packet)
-        can_id = int.from_bytes(frames[0][0:4], "big")
-        self.assertTrue(check_data(can_id, frames[0][4]))
+    def test_copy_request_consumed_locally(self):
+        consumed, _ = check_data(self._request(b"", can_id=0x0040AF7E))
+        self.assertTrue(consumed)
 
-    def test_config_stream_hash_0x0300_goes_to_can(self):
-        # hash 0x0300: canid & 0x0000fcff == 0 -> forwarded to CAN
-        # (this is the hash used by the copy-request constants in gio.c)
-        rx = TcpRxBuf()
+    def test_unknown_config_request_forwarded_with_response_bit(self):
+        # CHARACTERIZATION of the current C behaviour, not a requirement:
+        # check_data() sets the response bit in place (netframe[1] |= 1)
+        # BEFORE the name lookup, so a request for a name can2lan does not
+        # serve itself (lokinfo, loknamen, ...) is forwarded to CAN as a
+        # *response* frame. A device on the bus will not answer it.
+        consumed, out = check_data(self._request(b"lokinfo"))
+        self.assertFalse(consumed)
+        self.assertEqual(out[1], 0x41)
+        self.assertEqual(out[1] & 1, 1)
+
+    def test_config_stream_copy_hash_consumed_locally(self):
+        # hash 0x0300 (GETCONFIG_RESPONSE): canid & 0xfcff == 0 -> ret = 1
         packet = bytes([0x00, 0x42, 0x03, 0x00, 0x06]) + bytes(8)
-        frames = rx.feed(packet)
-        can_id = int.from_bytes(frames[0][0:4], "big")
-        self.assertFalse(check_data(can_id, frames[0][4]))
+        consumed, _ = check_data(packet)
+        self.assertTrue(consumed)
 
-    def test_config_stream_copy_request_hash_goes_to_can(self):
-        # hash 0x0000: canid & 0x0000fcff == 0 -> forwarded to CAN
-        rx = TcpRxBuf()
-        packet = bytes([0x00, 0x42, 0x00, 0x00, 0x06]) + bytes(8)
-        frames = rx.feed(packet)
-        can_id = int.from_bytes(frames[0][0:4], "big")
-        self.assertFalse(check_data(can_id, frames[0][4]))
+    def test_config_stream_other_hash_forwarded_to_can(self):
+        # any other hash: canid & 0xfcff != 0 -> ret = 0 -> forwarded
+        for hash_bytes in ((0x03, 0x01), (0x12, 0x34), (0x00, 0x01)):
+            packet = bytes([0x00, 0x42]) + bytes(hash_bytes) + bytes([6]) + bytes(8)
+            consumed, out = check_data(packet)
+            self.assertFalse(consumed, hash_bytes)
+            self.assertEqual(out, packet)
 
     def test_fragmented_stream_frames_each_decision(self):
-        # a config data stream split across two TCP reads
+        # a config data stream (hash 0x1234) split across two TCP reads:
+        # every reassembled frame is forwarded to CAN unchanged
         rx = TcpRxBuf()
         stream = send_tcp_config_data(b"[loks]\n", 0x00401234)
         wire = b"".join(stream)
         cut = 2 * CAN_ENCAP_SIZE + 5
         frames = rx.feed(wire[:cut]) + rx.feed(wire[cut:])
-        self.assertEqual(len(frames), len(stream))
+        self.assertEqual(frames, stream)
         for frame in frames:
-            can_id = int.from_bytes(frame[0:4], "big")
-            self.assertTrue(check_data(can_id, frame[4]))
+            consumed, out = check_data(frame)
+            self.assertFalse(consumed)
+            self.assertEqual(out, frame)
 
 
 class TestStreamReception(unittest.TestCase):

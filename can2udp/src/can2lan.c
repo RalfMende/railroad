@@ -845,6 +845,11 @@ int main(int argc, char **argv) {
     sigaction(SIGHUP, &sigact, NULL);
     sigaction(SIGINT, &sigact, NULL);
     sigaction(SIGTERM, &sigact, NULL);
+    /* writing to a disconnected TCP client must not kill the process -
+       sendto() then fails with EPIPE and the client is cleaned up on the
+       next read */
+    sigact.sa_handler = SIG_IGN;
+    sigaction(SIGPIPE, &sigact, NULL);
     sigemptyset(&emptyset);
 
     /* set select timeout -> send periodic CAN Ping */
@@ -943,6 +948,11 @@ int main(int argc, char **argv) {
 	/* received a TCP packet */
 	if (FD_ISSET(st, &read_fds)) {
 	    conn_fd = accept(st, (struct sockaddr *)&tcp_addr, &tcp_client_length);
+	    if (conn_fd < 0) {
+		syslog(LOG_ERR, "%s: accept on TCP port failed: %s\n", __func__, strerror(errno));
+		if (--nready <= 0)
+		    continue;
+	    } else {
 	    if (cs2_config_data.verbose && !background) {
 		printf("new client request: %s, port %d conn fd: %d max fds: %d active tcp_cons: %d\n", inet_ntop(AF_INET, &(tcp_addr.sin_addr),
 			buffer, sizeof(buffer)), ntohs(tcp_addr.sin_port), conn_fd, max_fds, tcp_connections);
@@ -952,6 +962,7 @@ int main(int argc, char **argv) {
 
 	    if (tcp_connections == MAX_TCP_CONN) {
 		shutdown(conn_fd, SHUT_RDWR);
+		close(conn_fd);
 		fprintf(stderr, "too many TCP clients\n");
 		syslog(LOG_ERR, "%s: too many TCP clients\n", __func__);
 	    } else {
@@ -971,6 +982,7 @@ int main(int argc, char **argv) {
 		if (cs2_config_data.verbose && !background)
 		    printf("send embedded CAN ping\n");
 	    }
+	    }
 
 	    if (--nready <= 0)
 		continue;	/* no more readable descriptors */
@@ -978,7 +990,11 @@ int main(int argc, char **argv) {
 	/* received a packet on second TCP port */
 	if (FD_ISSET(st2, &read_fds)) {
 	    conn_fd = accept(st2, (struct sockaddr *)&tcp_addr2, &tcp_client_length);
-
+	    if (conn_fd < 0) {
+		syslog(LOG_ERR, "%s: accept on second TCP port failed: %s\n", __func__, strerror(errno));
+		if (--nready <= 0)
+		    continue;
+	    } else {
 	    if (cs2_config_data.verbose && !background) {
 		printf("new client request: %s, port %d conn fd: %d max fds: %d active tcp_cons:%d\n", inet_ntop(AF_INET, &(tcp_addr2.sin_addr),
 			buffer, sizeof(buffer)), ntohs(tcp_addr2.sin_port), conn_fd, max_fds, tcp_connections);
@@ -987,6 +1003,7 @@ int main(int argc, char **argv) {
 			 inet_ntop(AF_INET, &(tcp_addr2.sin_addr), buffer, sizeof(buffer)), ntohs(tcp_addr2.sin_port), conn_fd, max_fds, tcp_connections);
 	    if (tcp_connections == MAX_TCP_CONN) {
 		shutdown(conn_fd, SHUT_RDWR);
+		close(conn_fd);
 		fprintf(stderr, "too many TCP clients\n");
 		syslog(LOG_ERR, "%s: too many TCP clients\n", __func__);
 	    } else {
@@ -1000,6 +1017,7 @@ int main(int argc, char **argv) {
 		FD_SET(conn_fd, &all_fds);		/* add new descriptor to set */
 		max_fds = MAX(conn_fd, max_fds);	/* for select */
 		max_tcp_i = MAX(i, max_tcp_i);	/* max index in tcp_client[] array */
+	    }
 	    }
 
 	    if (--nready <= 0)
@@ -1018,8 +1036,10 @@ int main(int argc, char **argv) {
 		    printf("%s packet from: %s\n", timestamp, inet_ntop(AF_INET, &tcp_addr.sin_addr, buffer, sizeof(buffer)));
 		}
 		n = read(tcp_socket, netframe, MAXDG);
-		if (!n) {
-		    /* connection closed by client */
+		if (n <= 0) {
+		    /* connection closed by client or read error (e.g. ECONNRESET) */
+		    if (n < 0)
+			syslog(LOG_ERR, "%s: reading TCP data error: %s\n", __func__, strerror(errno));
 		    if (cs2_config_data.verbose && !background) {
 			time_stamp(timestamp);
 			printf("%s client %s closed connection\n", timestamp, inet_ntop(AF_INET, &tcp_addr.sin_addr, buffer, sizeof(buffer)));
@@ -1033,8 +1053,6 @@ int main(int argc, char **argv) {
 		    FD_CLR(tcp_socket, &all_fds);
 		    tcp_client[i] = -1;
 		    tcp_connections--;
-		} else if (n < 0) {
-		    syslog(LOG_ERR, "%s: reading TCP data error: %s\n", __func__, strerror(errno));
 		} else {
 		    /* TCP is a byte stream: reassemble complete 13-byte CAN frames per connection */
 		    int nframes = tcp_rx_feed(&tcp_rx[i], netframe, n, tcp_frames, sizeof(tcp_frames) / CAN_ENCAP_SIZE);
@@ -1067,8 +1085,10 @@ int main(int argc, char **argv) {
 		    printf("%s TCP2 socket packet from: %s\n", timestamp, inet_ntop(AF_INET, &tcp_addr2.sin_addr, buffer, sizeof(buffer)));
 		}
 		n = read(tcp_socket, netframe, MAXDG);
-		if (!n) {
-		    /* connection closed by client */
+		if (n <= 0) {
+		    /* connection closed by client or read error (e.g. ECONNRESET) */
+		    if (n < 0)
+			syslog(LOG_ERR, "%s: reading TCP2 data error: %s\n", __func__, strerror(errno));
 		    if (cs2_config_data.verbose && !background) {
 			time_stamp(timestamp);
 			printf("%s client %s closed connection\n", timestamp, inet_ntop(AF_INET, &tcp_addr2.sin_addr, buffer, sizeof(buffer)));
