@@ -38,7 +38,7 @@ CAN_ENCAP_SIZE = 13          # 4 byte CAN-ID + 1 byte DLC + 8 byte data
 CAN_EFF_FLAG = 0x80000000    # extended frame format flag (SocketCAN)
 CAN_EFF_MASK = 0x1FFFFFFF
 
-# from src/can2lan.c main(): config change broadcast detection
+# from src/cs2-core.c cs2_core_handle_frame(): config change broadcast detection
 BC_CHANGE_MASK = 0x1FFFF00
 BC_CHANGE_ID = 0x0434700
 
@@ -100,7 +100,8 @@ def frame_to_net(can_id, data, dlc=None, filters=()):
 
 
 def can_receive_path(can_id, dlc, data, filters=()):
-    """Model of the CAN receive path in main() of src/can2lan.c.
+    """Model of the CAN receive path: main() of src/can2lan.c forwards via
+    cs2_core_handle_can_frame() / cs2_core_handle_frame() in src/cs2-core.c.
 
     Returns ("broadcast", can_id) for config change broadcasts,
     ("forward", packet) for regular forwarding to UDP and TCP clients,
@@ -366,7 +367,7 @@ class TestCanReceivePath(unittest.TestCase):
         self.assertEqual(udp_packet, tcp_packet)
 
     def test_config_change_broadcast_diverted(self):
-        # (can_id & 0x1FFFF00) == 0x0434700 and DLC 8 -> emit_change_broadcast
+        # (can_id & 0x1FFFF00) == 0x0434700 and DLC 8 -> consumed by cs2_core_handle_frame()
         result = can_receive_path(0x00434711 | CAN_EFF_FLAG, 8, b"loks\x00\x00\x00\x00")
         self.assertEqual(result[0], "broadcast")
 
@@ -450,7 +451,7 @@ class TestConfigDataStream(unittest.TestCase):
         self.assertEqual(zlib.decompress(payload[4:stream_len]), b"")
 
     def test_broadcast_start_frame(self):
-        # emit_change_broadcast(): DLC 7, reserved byte = can_id & 0xFF
+        # config change broadcast (cs2-core.c): DLC 7, reserved byte = can_id & 0xFF
         frames = send_tcp_config_data(self.CONTENT, 0x00434711, broadcast=True, fill=0x11)
         header = frames[0]
         self.assertEqual(header[4], 7)

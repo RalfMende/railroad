@@ -117,6 +117,8 @@ struct gw_io_ctx {
     int udp_socket;		/* UDP broadcast sending socket */
     struct sockaddr *udp_baddr;	/* UDP broadcast destination */
     int can_socket;		/* CAN socket */
+    int *tcp_clients;		/* TCP client socket array */
+    int *tcp_client_max;	/* index of the last used entry in tcp_clients */
 };
 
 static int gw_udp_send(void *arg, unsigned char *frame, int len) {
@@ -137,6 +139,11 @@ static int gw_can_send(void *arg, unsigned char *frame) {
 static int gw_tcp_config_send(void *arg, char *name, uint32_t canid, int *tcp_socket_list, int socket_nmbr, int flags, uint8_t fill) {
     (void)arg;
     return send_tcp_config_data(name, config_dir, canid, tcp_socket_list, socket_nmbr, flags, fill);
+}
+
+static int gw_tcp_config_send_all(void *arg, char *name, uint32_t canid, int flags, uint8_t fill) {
+    struct gw_io_ctx *io = (struct gw_io_ctx *)arg;
+    return send_tcp_config_data(name, config_dir, canid, io->tcp_clients, *io->tcp_client_max + 1, flags, fill);
 }
 
 void signal_handler(int sig) {
@@ -214,11 +221,14 @@ int main(int argc, char **argv) {
     gw_io.udp_socket = -1;
     gw_io.udp_baddr = NULL;
     gw_io.can_socket = -1;
+    gw_io.tcp_clients = tcp_client;
+    gw_io.tcp_client_max = &max_tcp_i;
     core_io.arg = &gw_io;
     core_io.udp_send = gw_udp_send;
     core_io.tcp_send = gw_tcp_send;
     core_io.can_send = gw_can_send;
     core_io.tcp_config_send = gw_tcp_config_send;
+    core_io.tcp_config_send_all = gw_tcp_config_send_all;
     cs2_core_init(&core, &core_io);
 
     page_name = calloc(MAX_TRACK_PAGE, sizeof(char *));
@@ -648,9 +658,8 @@ int main(int argc, char **argv) {
 	    }
 	    /* if CAN Frame is EFF do it - but never forward the previous frame again after a failed read */
 	    if ((n == (int)sizeof(struct can_frame)) && (frame.can_id & CAN_EFF_FLAG)) {	/* only EFF frames are valid */
-		if (((frame.can_id & 0x1FFFF00) == 0x0434700) && (frame.can_dlc == 8)) {
-		    cs2_core_emit_change_broadcast(&core, &frame, tcp_client, max_tcp_i + 1);
-		} else {
+		/* the core sees every frame on the CAN bus and may consume it (config change broadcast) */
+		if (!cs2_core_handle_can_frame(&core, &frame)) {
 		    /* send UDP frame */
 		    frame_to_net(sb, (struct sockaddr *)&baddr, (struct can_frame *)&frame);
 		    print_can_frame(UDP_FORMAT_STRG, netframe, core.cfg.verbose && !background);

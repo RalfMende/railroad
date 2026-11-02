@@ -169,29 +169,33 @@ int cs2_core_copy_config(struct cs2_core_t *core) {
 }
 
 /*
- * A config change broadcast was received on the CAN bus: send the named
- * config file as compressed config data stream to all TCP clients.
+ * Handle a frame received from the CAN bus: convert it to the 13-byte
+ * network format and let cs2_core_handle_frame() decide what to do with it.
+ * Returns 0 if the frame has to be forwarded to UDP/TCP, 1 if it was
+ * consumed locally.
  */
-void cs2_core_emit_change_broadcast(struct cs2_core_t *core, struct can_frame *frame, int *tcp_socket_list, int snmbr) {
-    char config_name[9];
+int cs2_core_handle_can_frame(struct cs2_core_t *core, struct can_frame *frame) {
+    unsigned char netframe[CAN_ENCAP_SIZE];
+    uint32_t canid;
 
-    uint8_t fill = frame->can_id & 0xFF;
-    strncpy(config_name, (char *)frame->data, 8);
-    config_name[8] = '\0';
-    syslog(LOG_NOTICE, "%s: config request >%s<\n", __func__, config_name);
-    core->io.tcp_config_send(core->io.arg, config_name, frame->can_id, tcp_socket_list, snmbr,
-			     CRC | COMPRESSED | BCCHANGE, fill);
+    memset(netframe, 0, CAN_ENCAP_SIZE);
+    canid = htonl(frame->can_id & CAN_EFF_MASK);
+    memcpy(netframe, &canid, 4);
+    netframe[4] = frame->can_dlc;
+    memcpy(&netframe[5], frame->data, 8);
+    return cs2_core_handle_frame(core, CS2_SRC_CAN, -1, netframe);
 }
 
 /*
- * Handle a received 13-byte frame, regardless of whether it arrived via UDP
- * or TCP: answer CAN member pings (with -g also faked as CS2), serve config
- * file requests (loks/mags/gbs/fs and the *stat files) from the local config
- * directory, feed config data streams to reassemble_data() (gio.c) and apply
- * the MS1 workaround. Replies are routed to the UDP broadcast destination
- * (src = CS2_SRC_UDP) or back to the sending TCP client (src = CS2_SRC_TCP,
- * tcp_socket). Returns 0 if the frame has to be forwarded to the CAN bus,
- * 1 if it was consumed locally.
+ * Handle a received 13-byte frame, regardless of whether it arrived via UDP,
+ * TCP or the CAN bus: answer CAN member pings (with -g also faked as CS2),
+ * serve config file requests (loks/mags/gbs/fs and the *stat files) from the
+ * local config directory, feed config data streams to reassemble_data()
+ * (gio.c), distribute config change broadcasts and apply the MS1 workaround.
+ * Replies are routed to the UDP broadcast destination (src = CS2_SRC_UDP) or
+ * back to the sending TCP client (src = CS2_SRC_TCP, tcp_socket). Returns 0
+ * if the frame has to be forwarded (UDP/TCP frames: to the CAN bus, CAN
+ * frames: to UDP/TCP), 1 if it was consumed locally.
  */
 int cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, int tcp_socket, unsigned char *netframe) {
     uint32_t canid;
@@ -203,6 +207,22 @@ int cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, int
     ret = 0;
     memcpy(&canid, netframe, 4);
     canid = ntohl(canid);
+
+    /* frames from the CAN bus: a config change broadcast from a CAN member
+       triggers a config data stream to all TCP clients and is consumed;
+       every other frame is just forwarded by the gateway */
+    if (src == CS2_SRC_CAN) {
+	if (((canid & 0x1FFFF00UL) == 0x0434700UL) && (netframe[4] == 8)) {
+	    uint8_t fill = canid & 0xFF;
+	    strncpy(config_name, (char *)&netframe[5], 8);
+	    config_name[8] = '\0';
+	    syslog(LOG_NOTICE, "%s: config request >%s<\n", __func__, config_name);
+	    core->io.tcp_config_send_all(core->io.arg, config_name, canid, CRC | COMPRESSED | BCCHANGE, fill);
+	    return 1;
+	}
+	return 0;
+    }
+
     switch (canid & 0xFFFF0000UL) {
     case (0x00300000UL):
 	if (core->cs2fake_ping) {
