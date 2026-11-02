@@ -686,7 +686,7 @@ int main(int argc, char **argv) {
 		    /* queue the packet for the CAN bus (the queue has room: sa isn't read when it is full) */
 		    ret = can_tx_enqueue(netframe);
 		    print_can_frame(NET_UDP_FORMAT_STRG, netframe, core.cfg.verbose && !background);
-		    cs2_core_handle_udp_frame(&core, netframe);
+		    cs2_core_handle_frame(&core, CS2_SRC_UDP, -1, netframe);
 		}
 	    }
 	}
@@ -798,7 +798,7 @@ int main(int argc, char **argv) {
 		    /* TCP is a byte stream: reassemble complete 13-byte CAN frames per connection */
 		    int nframes = tcp_rx_feed(&tcp_rx[i], netframe, n, tcp_frames, sizeof(tcp_frames) / CAN_ENCAP_SIZE);
 		    for (j = 0; j < nframes; j++) {
-			if (!cs2_core_handle_tcp_frame(&core, tcp_socket, &tcp_frames[j * CAN_ENCAP_SIZE])) {
+			if (!cs2_core_handle_frame(&core, CS2_SRC_TCP, tcp_socket, &tcp_frames[j * CAN_ENCAP_SIZE])) {
 			    ret = can_tx_enqueue(&tcp_frames[j * CAN_ENCAP_SIZE]);
 			    if (!ret) {
 				if (j > 0)

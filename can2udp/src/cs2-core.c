@@ -184,90 +184,16 @@ void cs2_core_emit_change_broadcast(struct cs2_core_t *core, struct can_frame *f
 }
 
 /*
- * Handle a 13-byte frame received via UDP: answer CAN member pings (with
- * -g also faked as CS2) and trigger a pending config clone. Always returns
- * 0 - UDP frames are additionally forwarded to the CAN bus by the gateway.
+ * Handle a received 13-byte frame, regardless of whether it arrived via UDP
+ * or TCP: answer CAN member pings (with -g also faked as CS2), serve config
+ * file requests (loks/mags/gbs/fs and the *stat files) from the local config
+ * directory, feed config data streams to reassemble_data() (gio.c) and apply
+ * the MS1 workaround. Replies are routed to the UDP broadcast destination
+ * (src = CS2_SRC_UDP) or back to the sending TCP client (src = CS2_SRC_TCP,
+ * tcp_socket). Returns 0 if the frame has to be forwarded to the CAN bus,
+ * 1 if it was consumed locally.
  */
-int cs2_core_handle_udp_frame(struct cs2_core_t *core, unsigned char *netframe) {
-    uint32_t canid;
-
-    memcpy(&canid, netframe, 4);
-    canid = ntohl(canid);
-    switch (canid & 0xFFFF0000UL) {
-    case (0x00300000UL):
-	if (core->cs2fake_ping) {
-	    if (core->cfg.verbose)
-		printf("                received CAN ping\n");
-	    memcpy(netframe, M_CAN_PING_CS2, 13);
-	    if (core->io.udp_send(core->io.arg, netframe, CAN_ENCAP_SIZE)) {
-		fprint_syslog_wc(stderr, LOG_ERR, "sending UDP data (CAN Ping member) error:", strerror(errno));
-	    } else {
-		print_can_frame(NET_UDP_FORMAT_STRG, netframe, core->cfg.verbose);
-		if (core->cfg.verbose)
-		    printf("                replied CAN ping (fake GFP)\n");
-	    }
-	}
-	break;
-    case (0x00310000UL):
-	if ((netframe[11] == 0xEE) && (netframe[12] == 0xEE)) {
-	    if (core->cfg.verbose)
-		printf("                received CAN ping\n");
-	    memcpy(netframe, M_PING_RESPONSE, 5);
-	    if (core->io.udp_send(core->io.arg, netframe, CAN_ENCAP_SIZE)) {
-		fprint_syslog_wc(stderr, LOG_ERR, "sending UDP data (CAN Ping) error:", strerror(errno));
-	    } else {
-		print_can_frame(NET_UDP_FORMAT_STRG, netframe, core->cfg.verbose);
-		if (core->cfg.verbose)
-		    printf("                replied CAN ping\n");
-	    }
-	    if (core->cfg.cs2_config_copy)
-		cs2_core_copy_config(core);
-	}
-	if (core->cs2fake_ping) {
-	    if (core->cfg.verbose)
-		printf("                received CAN ping\n");
-	    memcpy(netframe, M_CAN_PING_CS2_1, 13);
-	    if (core->io.udp_send(core->io.arg, netframe, CAN_ENCAP_SIZE)) {
-		fprint_syslog_wc(stderr, LOG_ERR, "sending UDP data (CAN Ping fake memeber) error:", strerror(errno));
-	    } else {
-		print_can_frame(NET_UDP_FORMAT_STRG, netframe, core->cfg.verbose);
-		if (core->cfg.verbose)
-		    printf("                replied CAN ping (fake member)\n");
-	    }
-	    memcpy(netframe, M_CAN_PING_CS2_2, 13);
-	    if (core->io.udp_send(core->io.arg, netframe, CAN_ENCAP_SIZE)) {
-		fprint_syslog_wc(stderr, LOG_ERR, "sending UDP data (CAN Ping fake member) error:", strerror(errno));
-	    } else {
-		print_can_frame(NET_UDP_FORMAT_STRG, netframe, core->cfg.verbose);
-		if (core->cfg.verbose)
-		    printf("                replied CAN ping (fake GFP)\n");
-	    }
-	}
-	break;
-    case (0x00400000UL):
-	/* check for initiated config request */
-	if (canid == 0x0040af7e) {
-	    if (core->cfg.verbose)
-		printf("copy config request\n");
-	    syslog(LOG_NOTICE, "%s %d: copy config request\n", __func__, __LINE__);
-	    core->cfg.cs2_config_copy = 1;
-	    cs2_core_copy_config(core);
-	}
-	break;
-    default:
-	break;
-    }
-    return 0;
-}
-
-/*
- * Handle a 13-byte frame received from a TCP client: answer CAN member
- * pings, serve config file requests (loks/mags/gbs/fs and the *stat files)
- * from the local config directory, feed config data streams to
- * reassemble_data() (gio.c) and apply the MS1 workaround. Returns 0 if the
- * frame has to be forwarded to the CAN bus, 1 if it was consumed locally.
- */
-int cs2_core_handle_tcp_frame(struct cs2_core_t *core, int tcp_socket, unsigned char *netframe) {
+int cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, int tcp_socket, unsigned char *netframe) {
     uint32_t canid;
     char config_name[9];
     char gbs_name[MAXLINE];
@@ -282,30 +208,89 @@ int cs2_core_handle_tcp_frame(struct cs2_core_t *core, int tcp_socket, unsigned 
 	if (core->cs2fake_ping) {
 	    if (core->cfg.verbose)
 		printf("                received CAN ping\n");
-	    memcpy(netframe, M_CAN_PING_CS2_3, 13);
-	    if (core->io.tcp_send(core->io.arg, tcp_socket, netframe, CAN_ENCAP_SIZE)) {
-		fprint_syslog_wc(stderr, LOG_ERR, "sending TCP data (CAN Ping member) error:", strerror(errno));
+	    if (src == CS2_SRC_TCP) {
+		memcpy(netframe, M_CAN_PING_CS2_3, 13);
+		if (core->io.tcp_send(core->io.arg, tcp_socket, netframe, CAN_ENCAP_SIZE)) {
+		    fprint_syslog_wc(stderr, LOG_ERR, "sending TCP data (CAN Ping member) error:", strerror(errno));
+		} else {
+		    print_can_frame(NET_TCP_FORMAT_STRG, netframe, core->cfg.verbose);
+		    if (core->cfg.verbose)
+			printf("                replied CAN ping (fake GFP)\n");
+		}
 	    } else {
-		print_can_frame(NET_TCP_FORMAT_STRG, netframe, core->cfg.verbose);
-		if (core->cfg.verbose)
-		    printf("                replied CAN ping (fake GFP)\n");
+		memcpy(netframe, M_CAN_PING_CS2, 13);
+		if (core->io.udp_send(core->io.arg, netframe, CAN_ENCAP_SIZE)) {
+		    fprint_syslog_wc(stderr, LOG_ERR, "sending UDP data (CAN Ping member) error:", strerror(errno));
+		} else {
+		    print_can_frame(NET_UDP_FORMAT_STRG, netframe, core->cfg.verbose);
+		    if (core->cfg.verbose)
+			printf("                replied CAN ping (fake GFP)\n");
+		}
 	    }
 	}
 	break;
     case (0x00310000UL):	/* CAN ping */
-	ret = 0;
-	/* looking for CAN member ping answer */
-	print_can_frame(NET_TCP_FORMAT_STRG, netframe, core->cfg.verbose);
-	if ((netframe[11] == 0xFF) && (netframe[12] == 0xFF)) {
-	    if (core->cfg.verbose)
-		printf("got CAN member TCP ping - copy config var: %d\n", core->cfg.cs2_config_copy);
-	    syslog(LOG_NOTICE, "%s: got CAN member TCP ping - copy config var: %d\n", __func__, core->cfg.cs2_config_copy);
-	    core->cfg.cs2_tcp_socket = tcp_socket;
-	    if (core->cfg.cs2_config_copy)
-		cs2_core_copy_config(core);
+	if (src == CS2_SRC_TCP) {
+	    ret = 0;
+	    /* looking for CAN member ping answer */
+	    print_can_frame(NET_TCP_FORMAT_STRG, netframe, core->cfg.verbose);
+	    if ((netframe[11] == 0xFF) && (netframe[12] == 0xFF)) {
+		if (core->cfg.verbose)
+		    printf("got CAN member TCP ping - copy config var: %d\n", core->cfg.cs2_config_copy);
+		syslog(LOG_NOTICE, "%s: got CAN member TCP ping - copy config var: %d\n", __func__, core->cfg.cs2_config_copy);
+		core->cfg.cs2_tcp_socket = tcp_socket;
+		if (core->cfg.cs2_config_copy)
+		    cs2_core_copy_config(core);
+	    }
+	} else {
+	    if ((netframe[11] == 0xEE) && (netframe[12] == 0xEE)) {
+		if (core->cfg.verbose)
+		    printf("                received CAN ping\n");
+		memcpy(netframe, M_PING_RESPONSE, 5);
+		if (core->io.udp_send(core->io.arg, netframe, CAN_ENCAP_SIZE)) {
+		    fprint_syslog_wc(stderr, LOG_ERR, "sending UDP data (CAN Ping) error:", strerror(errno));
+		} else {
+		    print_can_frame(NET_UDP_FORMAT_STRG, netframe, core->cfg.verbose);
+		    if (core->cfg.verbose)
+			printf("                replied CAN ping\n");
+		}
+		if (core->cfg.cs2_config_copy)
+		    cs2_core_copy_config(core);
+	    }
+	    if (core->cs2fake_ping) {
+		if (core->cfg.verbose)
+		    printf("                received CAN ping\n");
+		memcpy(netframe, M_CAN_PING_CS2_1, 13);
+		if (core->io.udp_send(core->io.arg, netframe, CAN_ENCAP_SIZE)) {
+		    fprint_syslog_wc(stderr, LOG_ERR, "sending UDP data (CAN Ping fake memeber) error:", strerror(errno));
+		} else {
+		    print_can_frame(NET_UDP_FORMAT_STRG, netframe, core->cfg.verbose);
+		    if (core->cfg.verbose)
+			printf("                replied CAN ping (fake member)\n");
+		}
+		memcpy(netframe, M_CAN_PING_CS2_2, 13);
+		if (core->io.udp_send(core->io.arg, netframe, CAN_ENCAP_SIZE)) {
+		    fprint_syslog_wc(stderr, LOG_ERR, "sending UDP data (CAN Ping fake member) error:", strerror(errno));
+		} else {
+		    print_can_frame(NET_UDP_FORMAT_STRG, netframe, core->cfg.verbose);
+		    if (core->cfg.verbose)
+			printf("                replied CAN ping (fake GFP)\n");
+		}
+	    }
 	}
 	break;
     case (0x00400000UL):	/* config data */
+	if (src == CS2_SRC_UDP) {
+	    /* check for initiated config request */
+	    if (canid == 0x0040af7e) {
+		if (core->cfg.verbose)
+		    printf("copy config request\n");
+		syslog(LOG_NOTICE, "%s %d: copy config request\n", __func__, __LINE__);
+		core->cfg.cs2_config_copy = 1;
+		cs2_core_copy_config(core);
+	    }
+	    break;
+	}
 	/* mark frame to send over CAN */
 	ret = 0;
 	/* check for special copy request */
@@ -389,28 +374,32 @@ int cs2_core_handle_tcp_frame(struct cs2_core_t *core, int tcp_socket, unsigned 
 	}
 	break;
     case (0x00420000UL):
-	/* check for bordcast config change: DLC = 7 */
-	if (netframe[4] == 7) {
-	    /* TODO */
-	    syslog(LOG_NOTICE, "%s: broadcast config change", __func__);
-	    core->cfg.name = BROADCAST_C0NFIG_UPDATE;
-	    core->cfg.state = CS2_STATE_BROADCAST_UPDATE;
+	if (src == CS2_SRC_TCP) {
+	    /* check for bordcast config change: DLC = 7 */
+	    if (netframe[4] == 7) {
+		/* TODO */
+		syslog(LOG_NOTICE, "%s: broadcast config change", __func__);
+		core->cfg.name = BROADCAST_C0NFIG_UPDATE;
+		core->cfg.state = CS2_STATE_BROADCAST_UPDATE;
+	    }
+	    /* check for initiated copy request or brodcast update */
+	    reassemble_data(&core->cfg, netframe);
+	    print_can_frame(NET_TCP_FORMAT_STRG, netframe, core->cfg.verbose);
+	    /* none CAN member copy request needs to be send over CAN */
+	    if (canid & 0x0000fcff)
+		ret = 0;
+	    else
+		ret = 1;
 	}
-	/* check for initiated copy request or brodcast update */
-	reassemble_data(&core->cfg, netframe);
-	print_can_frame(NET_TCP_FORMAT_STRG, netframe, core->cfg.verbose);
-	/* none CAN member copy request needs to be send over CAN */
-	if (canid & 0x0000fcff)
-	    ret = 0;
-	else
-	    ret = 1;
 	break;
 	/* fake cyclic MS1 slave monitoring response */
     case (0x0C000000UL):
-	/* mark CAN frame to send */
-	ret = 0;
-	if (core->ms1_workaround)
-	    netframe[5] = 0x03;
+	if (src == CS2_SRC_TCP) {
+	    /* mark CAN frame to send */
+	    ret = 0;
+	    if (core->ms1_workaround)
+		netframe[5] = 0x03;
+	}
 	break;
     default:
 	break;

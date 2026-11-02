@@ -33,6 +33,12 @@ struct cs2_core_io {
 			   uint8_t fill);
 };
 
+/* where a frame was received from / where replies are routed to */
+enum cs2_core_source {
+    CS2_SRC_UDP,	/* frame from UDP, replies go to the UDP broadcast destination */
+    CS2_SRC_TCP		/* frame from a TCP client, replies go to that client */
+};
+
 struct cs2_core_t {
     struct cs2_config_data_t cfg;	/* config clone/stream state */
     struct cs2_core_io io;
@@ -51,8 +57,7 @@ int cs2_core_send_start_frames(struct cs2_core_t *core);
 int cs2_core_send_ping(struct cs2_core_t *core);
 int cs2_core_copy_config(struct cs2_core_t *core);
 void cs2_core_emit_change_broadcast(struct cs2_core_t *core, struct can_frame *frame, int *tcp_socket_list, int snmbr);
-/* returns 0 if the frame has to be forwarded to the CAN bus, 1 if consumed locally */
-int cs2_core_handle_udp_frame(struct cs2_core_t *core, unsigned char *netframe);
-int cs2_core_handle_tcp_frame(struct cs2_core_t *core, int tcp_socket, unsigned char *netframe);
+/* handle a received 13-byte frame; returns 0 if it has to be forwarded to the CAN bus, 1 if consumed locally */
+int cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, int tcp_socket, unsigned char *netframe);
 
 #endif /* _CS2_CORE_H_ */

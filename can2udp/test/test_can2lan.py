@@ -15,7 +15,7 @@ be verified without a CAN interface or the OpenWrt toolchain:
 - frame_to_can()           src/gio.c     13-byte UDP/TCP packet -> CAN frame
 - UDP receive path         src/can2lan.c main(): 13-byte length check,
                            S88 event diversion, forwarding to CAN
-- cs2_core_handle_tcp_frame()  src/cs2-core.c TCP frames consumed locally
+- cs2_core_handle_frame()  src/cs2-core.c TCP frames consumed locally
                            (config requests, streams) vs. sent to CAN
                            (formerly check_data() in src/can2lan.c)
 - reassemble_data()        src/gio.c     config data stream reception
@@ -49,12 +49,12 @@ STREAM_SET_CMD = 0x00020000
 # from src/can2lan.c main(): S88 events are diverted to TCP clients
 S88_EVENT_MASK = 0x00230000
 
-# from src/cs2-core.c cs2_core_handle_tcp_frame(): config stream frames whose
+# from src/cs2-core.c cs2_core_handle_frame(): config stream frames whose
 # hash bits (canid & 0xFCFF) are all zero belong to a CAN member copy request
 # and are NOT forwarded to CAN; all other hashes are forwarded
 COPY_REQUEST_HASH_MASK = 0x0000FCFF
 
-# from src/cs2-core.c cs2_core_handle_tcp_frame(): config names answered by can2lan itself
+# from src/cs2-core.c cs2_core_handle_frame(): config names answered by can2lan itself
 LOCAL_CONFIG_NAMES = {b"loks", b"mags", b"gbs", b"fs",
                       b"lokstat", b"magstat", b"gbsstat", b"fsstat"}
 
@@ -171,7 +171,7 @@ def udp_receive_path(packet, filters=()):
 
 
 def check_data(frame):
-    """Model of the forwarding decision of cs2_core_handle_tcp_frame() in src/cs2-core.c
+    """Model of the forwarding decision of cs2_core_handle_frame() in src/cs2-core.c
     (formerly check_data() in src/can2lan.c).
 
     Takes a 13-byte TCP frame and returns (consumed, frame_out):
