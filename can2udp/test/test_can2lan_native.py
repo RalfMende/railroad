@@ -90,7 +90,7 @@ def setUpModule():
                                 "(on macOS run test/run_native_tests.sh)")
     BUILD = tempfile.mkdtemp(prefix="can2lan-test-")
     s = lambda name: os.path.join(SRC, name)  # noqa: E731
-    _gcc(["-o", os.path.join(BUILD, "can2lan"), s("can2lan.c"), s("gio.c"), s("ascii-frame.c"),
+    _gcc(["-o", os.path.join(BUILD, "can2lan"), s("can2lan.c"), s("cs2-core.c"), s("gio.c"), s("ascii-frame.c"),
           s("crc-ccitt.c"), s("read-cs2-config.c"), "-lz"])
     _gcc(["-shared", "-fPIC", "-o", os.path.join(BUILD, "can_shim.so"),
           os.path.join(HERE, "native", "can_shim.c"), "-ldl"])

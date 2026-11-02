@@ -13,6 +13,7 @@
  */
 
 #include "can2lan.h"
+#include "cs2-core.h"
 #include "ascii-frame.h"
 #include "read-cs2-config.h"
 
@@ -21,7 +22,6 @@ extern struct track_data_t *track_data;
 extern struct loco_data_t *loco_data;
 extern struct magnet_data_t *magnet_data;
 
-static char *CAN_FORMAT_STRG      = "      CAN->   0x%08X R [%d]";
 static char *UDP_FORMAT_STRG      = "->CAN>UDP     0x%08X   [%d]";
 static char *TCP_FORMAT_STRG      = "->TCP>CAN     0x%08X   [%d]";
 static char *TCP_FORMATS_STRG     = "->TCP>CAN*    0x%08X   [%d]";
@@ -29,58 +29,19 @@ static char *CAN_TCP_FORMAT_STRG  = "->CAN>TCP     0x%08X   [%d]";
 static char *UDP_TCP_FORMAT_STRG  = "->UDP>TCP     0x%08X   [%d]";
 static char *UDP_UDP_FORMAT_STRG  = "->UDP>UDP     0x%08X   [%d]";
 static char *NET_UDP_FORMAT_STRG  = "      UDP->   0x%08X   [%d]";
-static char *NET_TCP_FORMAT_STRG  = "      TCP->   0x%08X   [%d]";
 
 #define PING_TIME	12
 
-static char *BROADCAST_C0NFIG_UPDATE = "broadcast_update.cs2";
 static char *PIDFILE = "/var/run/can2lan.pid";
-
-static unsigned char M_GLEISBOX_MAGIC_START_SEQUENCE[] = { 0x00, 0x36, 0x03, 0x01, 0x05, 0x00, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00 };
-static unsigned char M_GLEISBOX_ALL_PROTO_ENABLE[]     = { 0x00, 0x00, 0x03, 0x01, 0x06, 0x00, 0x00, 0x00, 0x00, 0x08, 0x07, 0x00, 0x00 };
-static unsigned char M_CAN_PING[]                      = { 0x00, 0x30, 0x47, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-static unsigned char M_CAN_PING_CS2_1[]                = { 0x00, 0x31, 0x63, 0x4A, 0x08, 0x00, 0x00, 0x00, 0x00, 0x04, 0x02, 0xFF, 0xF0 };
-static unsigned char M_CAN_PING_CS2_2[]                = { 0x00, 0x31, 0x63, 0x4B, 0x08, 0x00, 0x00, 0x00, 0x00, 0x03, 0x44, 0x00, 0x00 };
-static unsigned char M_CAN_PING_CS2_3[]                = { 0x00, 0x31, 0x03, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x04, 0x02, 0xFF, 0xFF };
-static unsigned char M_CAN_PING_CS2[]                  = { 0x00, 0x30, 0x47, 0x11, 0x08, 0x00, 0x00, 0x00, 0x00, 0x03, 0x08, 0xff, 0xff };
-static unsigned char M_PING_RESPONSE[] = { 0x00, 0x30, 0x00, 0x00, 0x00 };
-
-unsigned char GETCONFIG[]          = { 0x00, 0x40, 0xaf, 0x7e, 0x08 };
-unsigned char GETCONFIG_DATA[]     = { 0x00, 0x42, 0x03, 0x00, 0x08 };
-
-char *cs2_configs[][2] = {
-    {"loks", "lokomotive.cs2"},
-    {"mags", "magnetartikel.cs2"},
-    {"fs", "fahrstrassen.cs2"},
-    {"gbs", "gleisbild.cs2"},
-    {"lokstat", "lokomotive.sr2"},
-    {"magstat", "magnetartikel.sr2"},
-    {"gbsstat", "gleisbild.sr2"},
-    {"fsstat", "fahrstrassen.sr2"},
-    {NULL, NULL},
-};
-
-char *ms2_configs[] = {
-    "lokinfo",
-    "loknamen",
-    "maginfo",
-    "lokdb",
-    "lang",
-    "ldbver",
-    "langver",
-    NULL
-};
 
 char config_dir[MAXLINE];
 char config_file[MAXLINE];
 char **page_name;
 char **cs2_page_name;
-int ms1_workaround;
-int cs2fake_ping, pidfd, do_loop = 1;
+int pidfd, do_loop = 1;
 
 static const int MAXPENDING = 16;       /* max outstanding tcp connections */
 unsigned char netframe[MAXDG];
-unsigned char ec_frame[13];
 
 struct filter_t filter[2];
 
@@ -150,6 +111,34 @@ static void close_tcp_client(int *client, struct tcp_rx_buf *rx, fd_set *all_fds
     (*connections)--;
 }
 
+/* I/O context handed to the CS2 core (cs2-core.c): the core never touches
+   sockets itself, all CAN/UDP/TCP transmission happens here in the gateway */
+struct gw_io_ctx {
+    int udp_socket;		/* UDP broadcast sending socket */
+    struct sockaddr *udp_baddr;	/* UDP broadcast destination */
+    int can_socket;		/* CAN socket */
+};
+
+static int gw_udp_send(void *arg, unsigned char *frame, int len) {
+    struct gw_io_ctx *io = (struct gw_io_ctx *)arg;
+    return net_to_net(io->udp_socket, io->udp_baddr, frame, len);
+}
+
+static int gw_tcp_send(void *arg, int tcp_socket, unsigned char *frame, int len) {
+    (void)arg;
+    return net_to_net(tcp_socket, NULL, frame, len);
+}
+
+static int gw_can_send(void *arg, unsigned char *frame) {
+    struct gw_io_ctx *io = (struct gw_io_ctx *)arg;
+    return frame_to_can(io->can_socket, frame);
+}
+
+static int gw_tcp_config_send(void *arg, char *name, uint32_t canid, int *tcp_socket_list, int socket_nmbr, int flags, uint8_t fill) {
+    (void)arg;
+    return send_tcp_config_data(name, config_dir, canid, tcp_socket_list, socket_nmbr, flags, fill);
+}
+
 void signal_handler(int sig) {
     syslog(LOG_WARNING, "got signal %s\n", strsignal(sig));
     do_loop = 0;
@@ -172,313 +161,6 @@ void print_usage(char *prg) {
     fprintf(stderr, "         -x                  excluding mask/filter CAN->LAN e.g. \"0x00FF0000 0x00170000\"\n");
     fprintf(stderr, "         -f                  running in foreground\n");
     fprintf(stderr, "         -v                  verbose output (in foreground)\n\n");
-}
-
-int send_start_60113_frames(int can_socket, int verbose) {
-    if (frame_to_can(can_socket, M_GLEISBOX_MAGIC_START_SEQUENCE) < 0) {
-	fprint_syslog(stderr, LOG_ERR, "can't send CAN magic 60113 start sequence");
-	return -1;
-    } else {
-	if (verbose) {
-	    printf("                CAN magic 60113 start written\n");
-	    print_can_frame(CAN_FORMAT_STRG, M_GLEISBOX_MAGIC_START_SEQUENCE, verbose);
-	}
-    }
-    if (frame_to_can(can_socket, M_GLEISBOX_ALL_PROTO_ENABLE) < 0) {
-	fprint_syslog(stderr, LOG_ERR, "can't enable all loco protos");
-	return -1;
-    } else {
-	if (verbose) {
-	    printf("                CAN enabled all loco protos\n");
-	    print_can_frame(CAN_FORMAT_STRG, M_GLEISBOX_ALL_PROTO_ENABLE, verbose);
-	}
-    }
-
-    return 0;
-}
-
-int send_can_ping(int can_socket, int verbose) {
-    if (frame_to_can(can_socket, M_CAN_PING) < 0) {
-	fprint_syslog(stderr, LOG_ERR, "can't send CAN Ping");
-	return -1;
-    } else {
-	if (verbose) {
-	    /* printf("                CAN Ping sent\n"); */
-	    print_can_frame(CAN_FORMAT_STRG, M_CAN_PING, verbose);
-	}
-    }
-    return 0;
-}
-
-int copy_cs2_config(struct cs2_config_data_t *cs2_config_data) {
-    char *ptr;
-    unsigned char newframe[CAN_ENCAP_SIZE];
-
-    syslog(LOG_NOTICE, "%s %d: copy config request\n", __func__, __LINE__);
-    if (cs2_config_data->cs2_tcp_socket) {
-	/* strip old subdir if needed */
-	ptr = strstr(cs2_config_data->dir, "gleisbilder/");
-	if (ptr)
-	    *ptr = 0;
-	memset(newframe, 0, CAN_ENCAP_SIZE);
-	memcpy(newframe, GETCONFIG, 5);
-	/* TODO */
-
-	/* syslog(LOG_NOTICE, "%s %d: copy config request (I next II)\n", __func__, __LINE__); */
-	if (cs2_config_data->verbose)
-	    printf("getting %s filename %s\n", cs2_configs[0][0], cs2_configs[0][1]);
-	/* syslog(LOG_NOTICE, "%s %d: getting %s filename %s II\n", __func__, __LINE__, cs2_configs[0][0], cs2_configs[0][1]); */
-
-	cs2_config_data->name = cs2_configs[0][1];
-	memcpy(&newframe[5], cs2_configs[0][0], strlen(cs2_configs[0][0]));
-	cs2_config_data->next = 1;
-
-	if (cs2_config_data->verbose)
-	    printf("send to CAN member ...\n");
-	net_to_net(cs2_config_data->cs2_tcp_socket, NULL, newframe, CAN_ENCAP_SIZE);
-	/* done - don't copy again */
-	cs2_config_data->cs2_config_copy = 0;
-	cs2_config_data->state = CS2_STATE_NORMAL_CONFIG;
-    } else {
-	if (cs2_config_data->verbose)
-	    fprintf(stderr, "can't clone CAN member config - no CAN member TCP connection yet\n");
-	/* syslog(LOG_ERR, "%s: can't clone CAN member config - no CS2 TCP connection yet\n", __func__); */
-	syslog(LOG_ERR, "%s: can't clone CAN member config - no CAN member TCP connection yet\n", __func__);
-    }
-    return 0;
-}
-
-void emit_change_broadcast(struct can_frame frame, int *tcp_socket_list, int snmbr) {
-    char config_name[9];
-
-    uint8_t fill = frame.can_id & 0xFF;
-    strncpy(config_name, (char *)frame.data, 8);
-    config_name[8] = '\0';
-    syslog(LOG_NOTICE, "%s: config request >%s<\n", __func__, config_name);
-    send_tcp_config_data(config_name, config_dir, frame.can_id, tcp_socket_list, snmbr, CRC | COMPRESSED | BCCHANGE, fill);
-}
-
-int check_data_udp(int udp_socket, struct sockaddr *baddr, struct cs2_config_data_t *cs2_config_data, unsigned char *netframe) {
-    uint32_t canid;
-
-    memcpy(&canid, netframe, 4);
-    canid = ntohl(canid);
-    switch (canid & 0xFFFF0000UL) {
-    case (0x00300000UL):
-	if (cs2fake_ping) {
-	    if (cs2_config_data->verbose)
-		printf("                received CAN ping\n");
-	    memcpy(netframe, M_CAN_PING_CS2, 13);
-	    if (net_to_net(udp_socket, baddr, netframe, CAN_ENCAP_SIZE)) {
-		fprint_syslog_wc(stderr, LOG_ERR, "sending UDP data (CAN Ping member) error:", strerror(errno));
-	    } else {
-		print_can_frame(NET_UDP_FORMAT_STRG, netframe, cs2_config_data->verbose);
-		if (cs2_config_data->verbose)
-		    printf("                replied CAN ping (fake GFP)\n");
-	    }
-	}
-	break;
-    case (0x00310000UL):
-	if ((netframe[11] == 0xEE) && (netframe[12] == 0xEE)) {
-	    if (cs2_config_data->verbose)
-		printf("                received CAN ping\n");
-	    memcpy(netframe, M_PING_RESPONSE, 5);
-	    if (net_to_net(udp_socket, baddr, netframe, CAN_ENCAP_SIZE)) {
-		fprint_syslog_wc(stderr, LOG_ERR, "sending UDP data (CAN Ping) error:", strerror(errno));
-	    } else {
-		print_can_frame(NET_UDP_FORMAT_STRG, netframe, cs2_config_data->verbose);
-		if (cs2_config_data->verbose)
-		    printf("                replied CAN ping\n");
-	    }
-	    if (cs2_config_data->cs2_config_copy)
-		copy_cs2_config(cs2_config_data);
-	}
-	if (cs2fake_ping) {
-	    if (cs2_config_data->verbose)
-		printf("                received CAN ping\n");
-	    memcpy(netframe, M_CAN_PING_CS2_1, 13);
-	    if (net_to_net(udp_socket, baddr, netframe, CAN_ENCAP_SIZE)) {
-		fprint_syslog_wc(stderr, LOG_ERR, "sending UDP data (CAN Ping fake memeber) error:", strerror(errno));
-	    } else {
-		print_can_frame(NET_UDP_FORMAT_STRG, netframe, cs2_config_data->verbose);
-		if (cs2_config_data->verbose)
-		    printf("                replied CAN ping (fake member)\n");
-	    }
-	    memcpy(netframe, M_CAN_PING_CS2_2, 13);
-	    if (net_to_net(udp_socket, baddr, netframe, CAN_ENCAP_SIZE)) {
-		fprint_syslog_wc(stderr, LOG_ERR, "sending UDP data (CAN Ping fake member) error:", strerror(errno));
-	    } else {
-		print_can_frame(NET_UDP_FORMAT_STRG, netframe, cs2_config_data->verbose);
-		if (cs2_config_data->verbose)
-		    printf("                replied CAN ping (fake GFP)\n");
-	    }
-	}
-	break;
-    case (0x00400000UL):
-	/* check for initiated config request */
-	if (canid == 0x0040af7e) {
-	    if (cs2_config_data->verbose)
-		printf("copy config request\n");
-	    syslog(LOG_NOTICE, "%s %d: copy config request\n", __func__, __LINE__);
-	    cs2_config_data->cs2_config_copy = 1;
-	    copy_cs2_config(cs2_config_data);
-	}
-	break;
-    default:
-	break;
-    }
-    return 0;
-}
-
-int check_data(int tcp_socket, struct cs2_config_data_t *cs2_config_data, unsigned char *netframe) {
-    uint32_t canid;
-    char config_name[9];
-    char gbs_name[MAXLINE];
-    int ret;
-    gbs_name[0] = '\0';
-
-    ret = 0;
-    memcpy(&canid, netframe, 4);
-    canid = ntohl(canid);
-    switch (canid & 0xFFFF0000UL) {
-    case (0x00300000UL):
-	if (cs2fake_ping) {
-	    if (cs2_config_data->verbose)
-		printf("                received CAN ping\n");
-	    memcpy(netframe, M_CAN_PING_CS2_3, 13);
-	    if (net_to_net(tcp_socket, NULL, netframe, CAN_ENCAP_SIZE)) {
-		fprint_syslog_wc(stderr, LOG_ERR, "sending TCP data (CAN Ping member) error:", strerror(errno));
-	    } else {
-		print_can_frame(NET_TCP_FORMAT_STRG, netframe, cs2_config_data->verbose);
-		if (cs2_config_data->verbose)
-		    printf("                replied CAN ping (fake GFP)\n");
-	    }
-	}
-	break;
-    case (0x00310000UL):	/* CAN ping */
-	ret = 0;
-	/* looking for CAN member ping answer */
-	print_can_frame(NET_TCP_FORMAT_STRG, netframe, cs2_config_data->verbose);
-	if ((netframe[11] == 0xFF) && (netframe[12] == 0xFF)) {
-	    if (cs2_config_data->verbose)
-		printf("got CAN member TCP ping - copy config var: %d\n", cs2_config_data->cs2_config_copy);
-	    syslog(LOG_NOTICE, "%s: got CAN member TCP ping - copy config var: %d\n", __func__, cs2_config_data->cs2_config_copy);
-	    cs2_config_data->cs2_tcp_socket = tcp_socket;
-	    if (cs2_config_data->cs2_config_copy)
-		copy_cs2_config(cs2_config_data);
-	}
-	break;
-    case (0x00400000UL):	/* config data */
-	/* mark frame to send over CAN */
-	ret = 0;
-	/* check for special copy request */
-	if (canid == 0x0040af7e) {
-	    ret = 1;
-	    netframe[1] |= 1;
-	    netframe[4] = 4;
-	    strcpy((char *)&netframe[5], "copy");
-	    net_to_net(tcp_socket, NULL, netframe, CAN_ENCAP_SIZE);
-	    if (cs2_config_data->verbose)
-		printf("CAN member copy request\n");
-	    syslog(LOG_NOTICE, "%s: CAN member copy request\n", __func__);
-	    cs2_config_data->cs2_config_copy = 1;
-	} else {
-	    strncpy(config_name, (char *)&netframe[5], 8);
-	    config_name[8] = '\0';
-	    syslog(LOG_NOTICE, "%s: config request >%s<\n", __func__, config_name);
-	    if (cs2_config_data->verbose)
-		printf("%s ID 0x%08x %s\n", __func__, canid, (char *)&netframe[5]);
-	    netframe[1] |= 1;
-	    net_to_net(tcp_socket, NULL, netframe, CAN_ENCAP_SIZE);
-	    if (strcmp("loks", config_name) == 0) {
-		ret = 1;
-		syslog(LOG_NOTICE, "%s: sending lokomotive.cs2\n", __func__);
-		send_tcp_config_data("lokomotive.cs2", config_dir, canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
-		break;
-	    } else if (strcmp("mags", config_name) == 0) {
-		ret = 1;
-		syslog(LOG_NOTICE, "%s: sending magnetartikel.cs2\n", __func__);
-		send_tcp_config_data("magnetartikel.cs2", config_dir, canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
-		break;
-	    } else if (strncmp("gbs-", config_name, 4) == 0) {
-		int page_number;
-		ret = 1;
-		page_number = atoi(&config_name[4]);
-		if ((page_number >= 0) && (page_number < MAX_TRACK_PAGE) && page_name[page_number]) {
-		    syslog(LOG_NOTICE, "%s: sending %s\n", __func__, gbs_name);
-		    send_tcp_config_data(gbs_name, config_dir, canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
-		    break;
-		}
-		syslog(LOG_NOTICE, "%s: cant't send gbs-%d\n", __func__, page_number);
-		break;
-	    } else if (strcmp("gbs", config_name) == 0) {
-		ret = 1;
-		syslog(LOG_NOTICE, "%s: sending gleisbild.cs2\n", __func__);
-		send_tcp_config_data("gleisbild.cs2", config_dir, canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
-		break;
-	    } else if (strcmp("fs", config_name) == 0) {
-		ret = 1;
-		syslog(LOG_NOTICE, "%s: sending fahrstrassen.cs2\n", __func__);
-		send_tcp_config_data("fahrstrassen.cs2", config_dir, canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
-		break;
-	    }
-	    /* TODO : these files depends on different internal states */
-	    else if (strcmp("lokstat", config_name) == 0) {
-		ret = 1;
-		/* fprintf(stderr, "%s: lokstat (lokomotive.sr2) not implemented yet\n", __func__); */
-		syslog(LOG_NOTICE, "%s: sending lokomotive.sr2\n", __func__);
-		send_tcp_config_data("lokomotive.sr2", config_dir, canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
-		break;
-	    } else if (strcmp("magstat", config_name) == 0) {
-		ret = 1;
-		/* fprintf(stderr, "%s: magstat (magnetartikel.sr2) not implemented yet\n\n", __func__); */
-		syslog(LOG_NOTICE, "%s: sending magnetartikel.sr2\n", __func__);
-		send_tcp_config_data("magnetartikel.sr2", config_dir, canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
-		break;
-	    } else if (strcmp("gbsstat", config_name) == 0) {
-		ret = 1;
-		/* fprintf(stderr, "%s: gbsstat (gleisbild.sr2) not implemented yet\n\n", __func__); */
-		syslog(LOG_NOTICE, "%s: sending gleisbild.sr2\n", __func__);
-		send_tcp_config_data("gleisbild.sr2", config_dir, canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
-		break;
-	    } else if (strcmp("fsstat", config_name) == 0) {
-		ret = 1;
-		/* fprintf(stderr, "%s: fsstat (fahrstrassen.sr2) not implemented yet\n\n", __func__); */
-		syslog(LOG_NOTICE, "%s: sending fahrstrassen.sr2\n", __func__);
-		send_tcp_config_data("fahrstrassen.sr2", config_dir, canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
-		break;
-	    }
-	    break;
-	}
-	break;
-    case (0x00420000UL):
-	/* check for bordcast config change: DLC = 7 */
-	if (netframe[4] == 7) {
-	    /* TODO */
-	    syslog(LOG_NOTICE, "%s: broadcast config change", __func__);
-	    cs2_config_data->name = BROADCAST_C0NFIG_UPDATE;
-	    cs2_config_data->state = CS2_STATE_BROADCAST_UPDATE;
-	}
-	/* check for initiated copy request or brodcast update */
-	reassemble_data(cs2_config_data, netframe);
-	print_can_frame(NET_TCP_FORMAT_STRG, netframe, cs2_config_data->verbose);
-	/* none CAN member copy request needs to be send over CAN */
-	if (canid & 0x0000fcff)
-	    ret = 0;
-	else
-	    ret = 1;
-	break;
-	/* fake cyclic MS1 slave monitoring response */
-    case (0x0C000000UL):
-	/* mark CAN frame to send */
-	ret = 0;
-	if (ms1_workaround)
-	    netframe[5] = 0x03;
-	break;
-    default:
-	break;
-    }
-    return ret;
 }
 
 int main(int argc, char **argv) {
@@ -509,7 +191,9 @@ int main(int argc, char **argv) {
     char *searchif;
     char *tempsp;
     char *loco_file;
-    struct cs2_config_data_t cs2_config_data;
+    struct cs2_core_t core;
+    struct cs2_core_io core_io;
+    struct gw_io_ctx gw_io;
     uint32_t id, mask;
 
     pidfd = 0;
@@ -526,7 +210,16 @@ int main(int argc, char **argv) {
 
     memset(&filter, 0, sizeof(filter));
 
-    memset(&cs2_config_data, 0, sizeof(cs2_config_data));
+    /* the CS2 core delegates all CAN/UDP/TCP transmission to the gateway */
+    gw_io.udp_socket = -1;
+    gw_io.udp_baddr = NULL;
+    gw_io.can_socket = -1;
+    core_io.arg = &gw_io;
+    core_io.udp_send = gw_udp_send;
+    core_io.tcp_send = gw_tcp_send;
+    core_io.can_send = gw_can_send;
+    core_io.tcp_config_send = gw_tcp_config_send;
+    cs2_core_init(&core, &core_io);
 
     page_name = calloc(MAX_TRACK_PAGE, sizeof(char *));
     if (!page_name) {
@@ -540,15 +233,7 @@ int main(int argc, char **argv) {
 	exit(EXIT_FAILURE);
     };
 
-    ms1_workaround = 0;
-    cs2fake_ping = 0;
-
-    cs2_config_data.verbose = 0;
-    cs2_config_data.state = CS2_STATE_INACTIVE;
-    cs2_config_data.page_name = cs2_page_name;
-    cs2_config_data.cs2_config_copy = 0;
-    cs2_config_data.cs2_tcp_socket = 0;
-    cs2_config_data.track_index = MAX_TRACK_PAGE;
+    core.cfg.page_name = cs2_page_name;
 
     memset(ifr.ifr_name, 0, sizeof(ifr.ifr_name));
     strcpy(ifr.ifr_name, "can0");
@@ -612,19 +297,19 @@ int main(int argc, char **argv) {
 	    strncpy(ifr.ifr_name, optarg, sizeof(ifr.ifr_name) - 1);
 	    break;
 	case 'k':
-	    cs2_config_data.cs2_config_copy = 1;
+	    core.cfg.cs2_config_copy = 1;
 	    break;
 	case 'T':
 	    timeout = strtoul(optarg, (char **)NULL, 10);
 	    break;
 	case 'g':
-	    cs2fake_ping = 1;
+	    core.cs2fake_ping = 1;
 	    break;
 	case 'm':
-	    ms1_workaround = 1;
+	    core.ms1_workaround = 1;
 	    break;
 	case 'v':
-	    cs2_config_data.verbose = 1;
+	    core.cfg.verbose = 1;
 	    break;
 	case 'f':
 	    background = 0;
@@ -667,7 +352,7 @@ int main(int argc, char **argv) {
     strncpy(config_dir, config_file, sizeof(config_dir) - 1);
     strcat(config_file, "gleisbild.cs2");
 
-    cs2_config_data.dir = config_dir;
+    core.cfg.dir = config_dir;
 
     page_name = read_track_file(config_file, page_name);
 
@@ -719,7 +404,7 @@ int main(int argc, char **argv) {
 	exit(EXIT_FAILURE);
     }
 
-    if (cs2_config_data.verbose && !background)
+    if (core.cfg.verbose && !background)
 	printf("using broadcast address %s\n", udp_dst_address);
 
     /* prepare UDP sending socket */
@@ -732,6 +417,8 @@ int main(int argc, char **argv) {
 	fprintf(stderr, "error setup UDP broadcast option: %s\n", strerror(errno));
 	exit(EXIT_FAILURE);
     }
+    gw_io.udp_socket = sb;
+    gw_io.udp_baddr = (struct sockaddr *)&baddr;
     free(udp_dst_address);
     free(bcast_interface);
 
@@ -811,8 +498,10 @@ int main(int argc, char **argv) {
 	exit(EXIT_FAILURE);
     }
 
+    gw_io.can_socket = sc;
+
     /* start Maerklin 60113 box */
-    if (send_start_60113_frames(sc, cs2_config_data.verbose))
+    if (cs2_core_send_start_frames(&core))
 	exit(EXIT_FAILURE);
 
     /* daemonize the process if requested */
@@ -917,11 +606,11 @@ int main(int argc, char **argv) {
 	    if (short_wait)
 		continue;
 	    /* send periodic ping */
-	    if (cs2fake_ping)
+	    if (core.cs2fake_ping)
 		cs2ping_timer++;
 	    if (cs2ping_timer >= PING_TIME) {
 		cs2ping_timer = 0;
-		print_can_frame(UDP_FORMAT_STRG, netframe, cs2_config_data.verbose && !background);
+		print_can_frame(UDP_FORMAT_STRG, netframe, core.cfg.verbose && !background);
 		if (can_tx_enqueue(M_CAN_PING) < 0) {
 		    fprint_syslog(stderr, LOG_ERR, "can't send CAN ping");
 		}
@@ -930,7 +619,7 @@ int main(int argc, char **argv) {
 		    if (tcp_socket <= 0)
 			continue;
 		    net_to_net(tcp_socket, NULL, M_CAN_PING, CAN_ENCAP_SIZE);
-		    print_can_frame(CAN_TCP_FORMAT_STRG, M_CAN_PING, cs2_config_data.verbose && !background);
+		    print_can_frame(CAN_TCP_FORMAT_STRG, M_CAN_PING, core.cfg.verbose && !background);
 		}
 	    }
 	    continue;
@@ -960,11 +649,11 @@ int main(int argc, char **argv) {
 	    /* if CAN Frame is EFF do it - but never forward the previous frame again after a failed read */
 	    if ((n == (int)sizeof(struct can_frame)) && (frame.can_id & CAN_EFF_FLAG)) {	/* only EFF frames are valid */
 		if (((frame.can_id & 0x1FFFF00) == 0x0434700) && (frame.can_dlc == 8)) {
-		    emit_change_broadcast(frame, tcp_client, max_tcp_i + 1);
+		    cs2_core_emit_change_broadcast(&core, &frame, tcp_client, max_tcp_i + 1);
 		} else {
 		    /* send UDP frame */
 		    frame_to_net(sb, (struct sockaddr *)&baddr, (struct can_frame *)&frame);
-		    print_can_frame(UDP_FORMAT_STRG, netframe, cs2_config_data.verbose && !background);
+		    print_can_frame(UDP_FORMAT_STRG, netframe, core.cfg.verbose && !background);
 		    /* send CAN frame to all connected TCP clients */
 		    /* TODO: need all clients the packets ? */
 		    for (i = 0; i <= max_tcp_i; i++) {	/* check all clients for data */
@@ -972,7 +661,7 @@ int main(int argc, char **argv) {
 			if (tcp_socket < 0)
 			    continue;
 			frame_to_net(tcp_socket, (struct sockaddr *)&tcp_addr, (struct can_frame *)&frame);
-			print_can_frame(CAN_TCP_FORMAT_STRG, netframe, cs2_config_data.verbose && !background);
+			print_can_frame(CAN_TCP_FORMAT_STRG, netframe, core.cfg.verbose && !background);
 		    }
 		}
 	    }
@@ -989,15 +678,15 @@ int main(int argc, char **argv) {
 			if (tcp_socket < 0)
 			    continue;
 			net_to_net(tcp_socket, NULL, netframe, CAN_ENCAP_SIZE);
-			print_can_frame(UDP_TCP_FORMAT_STRG, netframe, cs2_config_data.verbose && !background);
+			print_can_frame(UDP_TCP_FORMAT_STRG, netframe, core.cfg.verbose && !background);
 		    }
 		    net_to_net(sb, (struct sockaddr *)&baddr, netframe, CAN_ENCAP_SIZE);
-		    print_can_frame(UDP_UDP_FORMAT_STRG, netframe, cs2_config_data.verbose && !background);
+		    print_can_frame(UDP_UDP_FORMAT_STRG, netframe, core.cfg.verbose && !background);
 		} else {
 		    /* queue the packet for the CAN bus (the queue has room: sa isn't read when it is full) */
 		    ret = can_tx_enqueue(netframe);
-		    print_can_frame(NET_UDP_FORMAT_STRG, netframe, cs2_config_data.verbose && !background);
-		    check_data_udp(sb, (struct sockaddr *)&baddr, &cs2_config_data, netframe);
+		    print_can_frame(NET_UDP_FORMAT_STRG, netframe, core.cfg.verbose && !background);
+		    cs2_core_handle_udp_frame(&core, netframe);
 		}
 	    }
 	}
@@ -1009,7 +698,7 @@ int main(int argc, char **argv) {
 		if (--nready <= 0)
 		    continue;
 	    } else {
-	    if (cs2_config_data.verbose && !background) {
+	    if (core.cfg.verbose && !background) {
 		printf("new client request: %s, port %d conn fd: %d max fds: %d active tcp_cons: %d\n", inet_ntop(AF_INET, &(tcp_addr.sin_addr),
 			buffer, sizeof(buffer)), ntohs(tcp_addr.sin_port), conn_fd, max_fds, tcp_connections);
 	    }
@@ -1036,7 +725,7 @@ int main(int argc, char **argv) {
 		/* send embedded CAN ping */
 		memcpy(netframe, M_CAN_PING, CAN_ENCAP_SIZE);
 		net_to_net(conn_fd, NULL, netframe, CAN_ENCAP_SIZE);
-		if (cs2_config_data.verbose && !background)
+		if (core.cfg.verbose && !background)
 		    printf("send embedded CAN ping\n");
 	    }
 	    }
@@ -1052,7 +741,7 @@ int main(int argc, char **argv) {
 		if (--nready <= 0)
 		    continue;
 	    } else {
-	    if (cs2_config_data.verbose && !background) {
+	    if (core.cfg.verbose && !background) {
 		printf("new client request: %s, port %d conn fd: %d max fds: %d active tcp_cons:%d\n", inet_ntop(AF_INET, &(tcp_addr2.sin_addr),
 			buffer, sizeof(buffer)), ntohs(tcp_addr2.sin_port), conn_fd, max_fds, tcp_connections);
 	    }
@@ -1088,7 +777,7 @@ int main(int argc, char **argv) {
 		continue;
 	    /* printf("%s tcp packet received from client #%d  max_tcp_i:%d todo:%d\n", time_stamp(timestamp), i, max_tcp_i,nready); */
 	    if (FD_ISSET(tcp_socket, &read_fds)) {
-		if (cs2_config_data.verbose && !background) {
+		if (core.cfg.verbose && !background) {
 		    time_stamp(timestamp);
 		    printf("%s packet from: %s\n", timestamp, inet_ntop(AF_INET, &tcp_addr.sin_addr, buffer, sizeof(buffer)));
 		}
@@ -1099,7 +788,7 @@ int main(int argc, char **argv) {
 		    /* connection closed by client or read error (e.g. ECONNRESET) */
 		    if (n < 0)
 			syslog(LOG_ERR, "%s: reading TCP data error: %s\n", __func__, strerror(errno));
-		    if (cs2_config_data.verbose && !background) {
+		    if (core.cfg.verbose && !background) {
 			time_stamp(timestamp);
 			printf("%s client %s closed connection\n", timestamp, inet_ntop(AF_INET, &tcp_addr.sin_addr, buffer, sizeof(buffer)));
 		    }
@@ -1109,16 +798,16 @@ int main(int argc, char **argv) {
 		    /* TCP is a byte stream: reassemble complete 13-byte CAN frames per connection */
 		    int nframes = tcp_rx_feed(&tcp_rx[i], netframe, n, tcp_frames, sizeof(tcp_frames) / CAN_ENCAP_SIZE);
 		    for (j = 0; j < nframes; j++) {
-			if (!check_data(tcp_socket, &cs2_config_data, &tcp_frames[j * CAN_ENCAP_SIZE])) {
+			if (!cs2_core_handle_tcp_frame(&core, tcp_socket, &tcp_frames[j * CAN_ENCAP_SIZE])) {
 			    ret = can_tx_enqueue(&tcp_frames[j * CAN_ENCAP_SIZE]);
 			    if (!ret) {
 				if (j > 0)
-				    print_can_frame(TCP_FORMATS_STRG, &tcp_frames[j * CAN_ENCAP_SIZE], cs2_config_data.verbose && !background);
+				    print_can_frame(TCP_FORMATS_STRG, &tcp_frames[j * CAN_ENCAP_SIZE], core.cfg.verbose && !background);
 				else
-				    print_can_frame(TCP_FORMAT_STRG, &tcp_frames[j * CAN_ENCAP_SIZE], cs2_config_data.verbose && !background);
+				    print_can_frame(TCP_FORMAT_STRG, &tcp_frames[j * CAN_ENCAP_SIZE], core.cfg.verbose && !background);
 			    }
 			    net_to_net(sb, (struct sockaddr *)&baddr, &tcp_frames[j * CAN_ENCAP_SIZE], CAN_ENCAP_SIZE);
-			    print_can_frame(UDP_FORMAT_STRG, &tcp_frames[j * CAN_ENCAP_SIZE], cs2_config_data.verbose && !background);
+			    print_can_frame(UDP_FORMAT_STRG, &tcp_frames[j * CAN_ENCAP_SIZE], core.cfg.verbose && !background);
 			}
 		    }
 		}
@@ -1132,7 +821,7 @@ int main(int argc, char **argv) {
 	    if (tcp_socket < 0)
 		continue;
 	    if (FD_ISSET(tcp_socket, &read_fds)) {
-		if (cs2_config_data.verbose && !background) {
+		if (core.cfg.verbose && !background) {
 		    time_stamp(timestamp);
 		    printf("%s TCP2 socket packet from: %s\n", timestamp, inet_ntop(AF_INET, &tcp_addr2.sin_addr, buffer, sizeof(buffer)));
 		}
@@ -1143,7 +832,7 @@ int main(int argc, char **argv) {
 		    /* connection closed by client or read error (e.g. ECONNRESET) */
 		    if (n < 0)
 			syslog(LOG_ERR, "%s: reading TCP2 data error: %s\n", __func__, strerror(errno));
-		    if (cs2_config_data.verbose && !background) {
+		    if (core.cfg.verbose && !background) {
 			time_stamp(timestamp);
 			printf("%s client %s closed connection\n", timestamp, inet_ntop(AF_INET, &tcp_addr2.sin_addr, buffer, sizeof(buffer)));
 		    }
