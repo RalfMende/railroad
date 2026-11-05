@@ -30,7 +30,7 @@ static char *UDP_TCP_FORMAT_STRG  = "->UDP>TCP     0x%08X   [%d]";
 static char *UDP_UDP_FORMAT_STRG  = "->UDP>UDP     0x%08X   [%d]";
 static char *NET_UDP_FORMAT_STRG  = "      UDP->   0x%08X   [%d]";
 
-#define PING_TIME	12
+#define PING_TIME	10
 
 static char *PIDFILE = "/var/run/can2lan.pid";
 
@@ -131,9 +131,27 @@ static int gw_tcp_send(void *arg, int tcp_socket, unsigned char *frame, int len)
     return net_to_net(tcp_socket, NULL, frame, len);
 }
 
+static int gw_tcp_send_all(void *arg, unsigned char *frame, int len) {
+    struct gw_io_ctx *io = (struct gw_io_ctx *)arg;
+    int i, ret = 0;
+
+    for (i = 0; i <= *io->tcp_client_max; i++) {
+	if (io->tcp_clients[i] < 0)
+	    continue;
+	if (net_to_net(io->tcp_clients[i], NULL, frame, len) < 0)
+	    ret = -1;
+    }
+    return ret;
+}
+
 static int gw_can_send(void *arg, unsigned char *frame) {
     struct gw_io_ctx *io = (struct gw_io_ctx *)arg;
     return frame_to_can(io->can_socket, frame);
+}
+
+static int gw_can_enqueue(void *arg, unsigned char *frame) {
+    (void)arg;
+    return can_tx_enqueue(frame);
 }
 
 static int gw_tcp_config_send(void *arg, char *name, uint32_t canid, int *tcp_socket_list, int socket_nmbr, int flags, uint8_t fill) {
@@ -162,7 +180,8 @@ void print_usage(char *prg) {
     fprintf(stderr, "         -b <bcast_addr/int> broadcast address or interface - default 255.255.255.255/br-lan\n");
     fprintf(stderr, "         -i <can int>        CAN interface - default can0\n");
     fprintf(stderr, "         -k                  use a connected CAN member as config source\n");
-    fprintf(stderr, "         -g                  send peridoic CAN member ping\n");
+    fprintf(stderr, "         -g                  obsolete: use -S for slave mode)\n", PING_TIME);
+    fprintf(stderr, "         -S                  cs2-core acts like a central station in slave mode (default: master mode)\n", PING_TIME);
     fprintf(stderr, "         -T                  timeout starting %s in sec - default %d sec\n", prg, MAX_UDP_BCAST_RETRY);
     fprintf(stderr, "         -m                  doing MS1 workaround - default: don't do it\n");
     fprintf(stderr, "         -x                  excluding mask/filter CAN->LAN e.g. \"0x00FF0000 0x00170000\"\n");
@@ -226,7 +245,9 @@ int main(int argc, char **argv) {
     core_io.arg = &gw_io;
     core_io.udp_send = gw_udp_send;
     core_io.tcp_send = gw_tcp_send;
+    core_io.tcp_send_all = gw_tcp_send_all;
     core_io.can_send = gw_can_send;
+    core_io.can_enqueue = gw_can_enqueue;
     core_io.tcp_config_send = gw_tcp_config_send;
     core_io.tcp_config_send_all = gw_tcp_config_send_all;
     cs2_core_init(&core, &core_io);
@@ -267,7 +288,7 @@ int main(int argc, char **argv) {
 
     config_file[0] = '\0';
 
-    while ((opt = getopt(argc, argv, "c:u:s:t:d:b:i:kT:x:gmvhf?")) != -1) {
+    while ((opt = getopt(argc, argv, "c:u:s:t:d:b:i:kT:x:gSmvhf?")) != -1) {
 	switch (opt) {
 	case 'c':
 	    if (strnlen(optarg, MAXLINE) < MAXLINE) {
@@ -313,7 +334,13 @@ int main(int argc, char **argv) {
 	    timeout = strtoul(optarg, (char **)NULL, 10);
 	    break;
 	case 'g':
-	    core.cs2fake_ping = 1;
+	    /* kept for backward compatibility, no effect: the periodic ping is
+	       now sent by default (master mode); use -S for the old behaviour */
+	    fprintf(stderr, "warning: option -g is obsolete and ignored (use -S for slave mode)\n");
+	    syslog(LOG_WARNING, "option -g is obsolete and ignored (use -S for slave mode)");
+	    break;
+	case 'S':
+	    core.slave = 1;
 	    break;
 	case 'm':
 	    core.ms1_workaround = 1;
@@ -615,8 +642,8 @@ int main(int argc, char **argv) {
 	    /* woke up only because the next CAN frame is due */
 	    if (short_wait)
 		continue;
-	    /* send periodic ping */
-	    if (core.cs2fake_ping)
+	    /* send periodic ping (master mode only) */
+	    if (!core.slave)
 		cs2ping_timer++;
 	    if (cs2ping_timer >= PING_TIME) {
 		cs2ping_timer = 0;

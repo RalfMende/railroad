@@ -60,6 +60,10 @@ CRC, COMPRESSED, BCCHANGE = 0x01, 0x02, 0x04
 
 CAN_FRAME = struct.Struct("=IB3x8s")  # struct can_frame: 16 bytes
 M_CAN_PING = bytes([0x00, 0x30, 0x47, 0x11]) + bytes(9)
+# ping answer of the slave mode (M_CAN_PING_CS2_3 in src/cs2-core.c):
+# response bit set, DLC 8, SW version 0x0402, device id 0xFFFF (CS2-GUI)
+M_CAN_PING_ANSWER = bytes([0x00, 0x31, 0x03, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x04, 0x02, 0xFF, 0xFF])
+PING_TIME = 10  # master mode ping interval in seconds (src/can2lan.c)
 
 BUILD = None
 LIB = None
@@ -913,11 +917,68 @@ class TestNativeGateway(unittest.TestCase):
         self.assertLess(time.monotonic() - start, 5.0)
         self.assertTrue(self.gw.alive())
 
+    # ---- master mode (default): periodic CAN member ping
+    def test_master_sends_periodic_can_ping(self):
+        ping = self.gw.bus_recv(PING_TIME + 2.0)
+        self.assertIsNotNone(ping, "no periodic CAN member ping within %d s" % (PING_TIME + 2))
+        self.assertEqual(ping, frame_to_can(M_CAN_PING))
+
     # ---- lifecycle
     def test_terminates_cleanly_on_sigterm(self):
         self.gw.connect()
         self.gw.proc.send_signal(signal.SIGTERM)
         self.assertEqual(self.gw.proc.wait(5), 0)
+
+
+class TestNativeGatewaySlave(unittest.TestCase):
+    """The can2lan binary in slave mode (-S): no periodic ping, pings are answered."""
+
+    def setUp(self):
+        self.gw = Gateway(self, args=("-S",))
+        # the gateway starts the 60113 box first
+        start = [self.gw.bus_recv(), self.gw.bus_recv()]
+        self.assertEqual([f[0] & 0x1FFFFFFF if f else None for f in start], [0x00360301, 0x00000301])
+
+    def test_slave_sends_no_periodic_ping(self):
+        self.assertIsNone(self.gw.bus_recv(PING_TIME + 1.0),
+                          "slave must not send the periodic CAN member ping")
+
+    def test_slave_answers_can_ping_on_all_transports(self):
+        client = self.gw.connect()
+        self.gw.bus_send(0x00304711, b"", dlc=0)
+        request = frame_to_net(0x00304711 | CAN_EFF_FLAG, b"", 0)
+        # on the bus only the answer appears (the request came from the bus)
+        self.assertEqual(self.gw.bus_recv(), frame_to_can(M_CAN_PING_ANSWER))
+        # UDP and TCP: the answer is sent first, then the bridged request
+        self.assertEqual(self.gw.udp_recv(), M_CAN_PING_ANSWER)
+        self.assertEqual(self.gw.udp_recv(), request)
+        self.assertEqual(recv_exact(client, 13), M_CAN_PING_ANSWER)
+        self.assertEqual(recv_exact(client, 13), request)
+
+    def test_slave_answers_udp_ping_on_all_transports(self):
+        client = self.gw.connect()
+        request = frame_to_net(0x00304711 | CAN_EFF_FLAG, b"", 0)
+        self.gw.udp_send(request)
+        # both frames go through the paced queue: the request first, then the answer
+        self.assertEqual(self.gw.bus_recv(), frame_to_can(request))
+        self.assertEqual(self.gw.bus_recv(), frame_to_can(M_CAN_PING_ANSWER))
+        self.assertEqual(self.gw.udp_recv(), M_CAN_PING_ANSWER)
+        # UDP frames are not bridged to TCP clients, they only get the answer
+        self.assertEqual(recv_exact(client, 13), M_CAN_PING_ANSWER)
+
+    def test_slave_answers_tcp_ping_on_all_transports(self):
+        client = self.gw.connect()
+        request = frame_to_net(0x00304711 | CAN_EFF_FLAG, b"", 0)
+        client.sendall(request)
+        # the core answers before the gateway queues the request, so the
+        # answer leaves the paced queue first (harmless: response bit set)
+        self.assertEqual(self.gw.bus_recv(), frame_to_can(M_CAN_PING_ANSWER))
+        self.assertEqual(self.gw.bus_recv(), frame_to_can(request))
+        # UDP gets the answer, then the bridged request
+        self.assertEqual(self.gw.udp_recv(), M_CAN_PING_ANSWER)
+        self.assertEqual(self.gw.udp_recv(), request)
+        # the sending TCP client only gets the answer
+        self.assertEqual(recv_exact(client, 13), M_CAN_PING_ANSWER)
 
 
 if __name__ == "__main__":

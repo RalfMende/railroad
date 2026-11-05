@@ -26,8 +26,12 @@ struct cs2_core_io {
     int (*udp_send)(void *arg, unsigned char *frame, int len);
     /* send a 13-byte CAN frame to a single TCP client */
     int (*tcp_send)(void *arg, int tcp_socket, unsigned char *frame, int len);
+    /* send a 13-byte CAN frame to all connected TCP clients */
+    int (*tcp_send_all)(void *arg, unsigned char *frame, int len);
     /* send a 13-byte CAN frame to the CAN bus (blocking, paced) */
     int (*can_send)(void *arg, unsigned char *frame);
+    /* queue a 13-byte CAN frame for the CAN bus (non-blocking, paced by the gateway's main loop) */
+    int (*can_enqueue)(void *arg, unsigned char *frame);
     /* send a config file as (compressed) config data stream to TCP clients */
     int (*tcp_config_send)(void *arg, char *name, uint32_t canid, int *tcp_socket_list, int socket_nmbr, int flags,
 			   uint8_t fill);
@@ -45,7 +49,7 @@ enum cs2_core_source {
 struct cs2_core_t {
     struct cs2_config_data_t cfg;	/* config clone/stream state */
     struct cs2_core_io io;
-    int cs2fake_ping;			/* -g: answer CAN member pings ourselves */
+    int slave;				/* -S: slave mode - answer CAN member pings, don't send them */
     int ms1_workaround;			/* -m: fake cyclic MS1 slave monitoring response */
 };
 
@@ -58,6 +62,8 @@ extern char *cs2_configs[][2];
 void cs2_core_init(struct cs2_core_t *core, const struct cs2_core_io *io);
 int cs2_core_send_start_frames(struct cs2_core_t *core);
 int cs2_core_send_ping(struct cs2_core_t *core);
+/* answer a CAN member ping (slave mode): queued for the CAN bus, sent to UDP and all TCP clients */
+int cs2_core_answer_ping(struct cs2_core_t *core);
 int cs2_core_copy_config(struct cs2_core_t *core);
 /* handle a received 13-byte frame; returns 0 if it has to be forwarded, 1 if consumed locally */
 int cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, int tcp_socket, unsigned char *netframe);
