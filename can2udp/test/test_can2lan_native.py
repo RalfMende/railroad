@@ -713,7 +713,15 @@ class Gateway:
         sock.connect(("127.0.0.1", self.ports["tcp"]))
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.clients.append(sock)
-        self.test.assertEqual(recv_exact(sock, 13), M_CAN_MEMBER_PING, "embedded CAN member ping on connect")
+        # Connection setup no longer sends an embedded ping to synchronize
+        # the test with the gateway's accept loop.
+        time.sleep(0.05)
+        return sock
+
+    def connect_ascii(self):
+        sock = socket.socket()
+        sock.connect(("127.0.0.1", self.ports["tcp2"]))
+        self.clients.append(sock)
         return sock
 
 
@@ -750,12 +758,31 @@ class TestNativeGateway(unittest.TestCase):
         self.gw.udp_send(seq_frame(1))
         self.assertIsNotNone(self.gw.bus_recv())
 
-    def test_s88_event_goes_to_tcp_clients_not_to_the_bus(self):
+    def test_s88_event_uses_the_regular_udp_to_can_path(self):
         client = self.gw.connect()
         packet = frame_to_net(0x00230001 | CAN_EFF_FLAG, bytes(range(8)), 8)
         self.gw.udp_send(packet)
-        self.assertEqual(recv_exact(client, 13), packet)
-        self.assertIsNone(self.gw.bus_recv(0.3))
+        self.assertEqual(self.gw.bus_recv(), frame_to_can(packet))
+        self.assertIsNone(self.gw.udp_recv(0.3))
+        client.settimeout(0.1)
+        with self.assertRaises(socket.timeout):
+            client.recv(1)
+
+    def test_tcp_connect_does_not_send_embedded_ping(self):
+        client = self.gw.connect()
+        client.settimeout(0.1)
+        with self.assertRaises(socket.timeout):
+            client.recv(1)
+
+    def test_secondary_tcp_ascii_command_is_handled(self):
+        client = self.gw.connect_ascii()
+        client.sendall(b"get loco list;")
+        client.settimeout(3)
+        response = bytearray()
+        while not response.endswith(b"\n"):
+            response.extend(client.recv(4096))
+        self.assertTrue(response.startswith(b"get loco listok;"))
+        self.assertIn(b"111 088-1 DB AG;", response)
 
     # ---- TCP -> CAN
     def test_tcp_frame_reaches_the_bus(self):

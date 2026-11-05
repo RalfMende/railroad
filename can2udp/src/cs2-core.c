@@ -15,6 +15,7 @@
  */
 
 #include "cs2-core.h"
+#include "ascii-frame.h"
 #include "read-cs2-config.h"
 
 static char *CAN_FORMAT_STRG     = "      CAN->   0x%08X R [%d]";
@@ -34,7 +35,7 @@ static unsigned char M_BOOTLOADER_CAN_BOUND[] =
 static unsigned char M_GLEISBOX_ALL_PROTO_ENABLE[] =
     { 0x00, 0x00, 0x03, 0x01, 0x06, 0x00, 0x00, 0x00, 0x00, 0x08, 0x07, 0x00, 0x00 };
 /* command 0x18 "Softwarestand Anfrage / Teilnehmer Ping", DLC 0: query all
-   CAN bus members (also sent by the gateway to new TCP clients) */
+   CAN bus members (also sent to TCP clients with the periodic master ping) */
 unsigned char M_CAN_MEMBER_PING[] =
     { 0x00, 0x30, 0x47, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 /* fake CS2 ping answers of further bus members, sent in slave mode */
@@ -293,22 +294,39 @@ int cs2_core_copy_config(struct cs2_core_t *core) {
     return 0;
 }
 
-/*
- * Handle a frame received from the CAN bus: convert it to the 13-byte
- * network format and let cs2_core_handle_frame() decide what to do with it.
- * Returns 0 if the frame has to be forwarded to UDP/TCP, 1 if it was
- * consumed locally.
- */
 int cs2_core_handle_can_frame(struct cs2_core_t *core, struct can_frame *frame) {
     unsigned char netframe[CAN_ENCAP_SIZE];
     uint32_t canid;
 
+    if (!(frame->can_id & CAN_EFF_FLAG))
+	return 0;
     memset(netframe, 0, CAN_ENCAP_SIZE);
     canid = htonl(frame->can_id & CAN_EFF_MASK);
     memcpy(netframe, &canid, 4);
     netframe[4] = frame->can_dlc;
     memcpy(&netframe[5], frame->data, 8);
-    return cs2_core_handle_frame(core, CS2_SRC_CAN, -1, netframe);
+    if (cs2_core_handle_frame(core, CS2_SRC_CAN, -1, netframe))
+	return 1;
+    return core->io.can_forward(core->io.arg, frame);
+}
+
+int cs2_core_handle_udp_frame(struct cs2_core_t *core, unsigned char *netframe) {
+    int ret = core->io.can_enqueue(core->io.arg, netframe);
+
+    if (ret < 0)
+	fprint_syslog(stderr, LOG_ERR, "can't queue UDP frame for CAN");
+    cs2_core_handle_frame(core, CS2_SRC_UDP, -1, netframe);
+    return ret;
+}
+
+int cs2_core_handle_tcp_frame(struct cs2_core_t *core, int tcp_socket, unsigned char *netframe) {
+    if (cs2_core_handle_frame(core, CS2_SRC_TCP, tcp_socket, netframe))
+	return 1;
+    if (core->io.can_enqueue(core->io.arg, netframe) < 0)
+	fprint_syslog(stderr, LOG_ERR, "can't queue TCP frame for CAN");
+    if (core->io.udp_send(core->io.arg, netframe, CAN_ENCAP_SIZE) < 0)
+	fprint_syslog_wc(stderr, LOG_ERR, "can't broadcast TCP frame over UDP:", strerror(errno));
+    return 0;
 }
 
 /*
@@ -540,4 +558,9 @@ int cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, int
 	break;
     }
     return ret;
+}
+
+int cs2_core_handle_ascii_frame(struct cs2_core_t *core, int tcp_socket, unsigned char *netframe, int length) {
+    (void)core;
+    return decode_ascii_frame(tcp_socket, netframe, length);
 }

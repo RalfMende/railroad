@@ -14,7 +14,7 @@ be verified without a CAN interface or the OpenWrt toolchain:
 - tcp_rx_feed()            src/can2lan.c TCP receive reassembly
 - frame_to_can()           src/gio.c     13-byte UDP/TCP packet -> CAN frame
 - UDP receive path         src/can2lan.c main(): 13-byte length check,
-                           S88 event diversion, forwarding to CAN
+                           forwarding to CAN without S88 special-casing
 - cs2_core_handle_frame()  src/cs2-core.c TCP frames consumed locally
                            (config requests, streams) vs. sent to CAN
                            (formerly check_data() in src/can2lan.c)
@@ -45,9 +45,6 @@ BC_CHANGE_ID = 0x0434700
 # from src/gio.c send_tcp_config_data(): request -> stream CAN-ID
 STREAM_CLEAR_RESP = 0xFFFEFFFF
 STREAM_SET_CMD = 0x00020000
-
-# from src/can2lan.c main(): S88 events are diverted to TCP clients
-S88_EVENT_MASK = 0x00230000
 
 # from src/cs2-core.c cs2_core_handle_frame(): config stream frames whose
 # hash bits (canid & 0xFCFF) are all zero belong to a CAN member copy request
@@ -159,15 +156,11 @@ def frame_to_can(packet):
 def udp_receive_path(packet, filters=()):
     """Model of the UDP receive path in main() of src/can2lan.c.
 
-    Returns ("s88", packet) for S88 events (diverted to TCP clients and
-    re-broadcast via UDP), ("can", frame) for regular forwarding to CAN,
-    or None for packets that are not exactly 13 bytes long.
+    Returns ("can", frame) for every valid packet or None for packets that
+    are not exactly 13 bytes long.
     """
     if len(packet) != CAN_ENCAP_SIZE:
         return None
-    can_id = int.from_bytes(packet[0:4], "big")
-    if (can_id & S88_EVENT_MASK) == S88_EVENT_MASK:
-        return ("s88", packet)
     return ("can", frame_to_can(packet))
 
 
@@ -525,16 +518,15 @@ class TestUdpReceivePath(unittest.TestCase):
     def test_packet_longer_than_13_bytes_discarded(self):
         self.assertIsNone(udp_receive_path(bytes(14)))
 
-    def test_s88_event_diverted_to_tcp_and_udp(self):
-        # (can_id & 0x00230000) == 0x00230000: not sent to CAN
+    def test_s88_event_uses_regular_udp_to_can_path(self):
         packet = frame_to_net(0x00230000 | CAN_EFF_FLAG, bytes(8), 8)
-        action, out = udp_receive_path(packet)
-        self.assertEqual(action, "s88")
-        self.assertEqual(out, packet)  # forwarded unchanged
+        action, frame = udp_receive_path(packet)
+        self.assertEqual(action, "can")
+        self.assertEqual(frame, frame_to_can(packet))
 
-    def test_s88_response_bit_variant_diverted(self):
+    def test_s88_response_bit_variant_uses_regular_path(self):
         packet = frame_to_net(0x00230001 | CAN_EFF_FLAG, bytes(8), 8)
-        self.assertEqual(udp_receive_path(packet)[0], "s88")
+        self.assertEqual(udp_receive_path(packet)[0], "can")
 
     def test_similar_id_not_diverted(self):
         packet = frame_to_net(0x00220000 | CAN_EFF_FLAG, bytes(8), 8)
