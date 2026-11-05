@@ -15,6 +15,7 @@
  */
 
 #include "cs2-core.h"
+#include "read-cs2-config.h"
 
 static char *CAN_FORMAT_STRG     = "      CAN->   0x%08X R [%d]";
 static char *NET_UDP_FORMAT_STRG = "      UDP->   0x%08X   [%d]";
@@ -80,21 +81,66 @@ char *ms2_configs[] = {
 extern char **page_name;
 
 /*
- * Initialize the core context and store the gateway I/O callbacks. The
- * context must be zero-initialized by the caller; options parsed before
- * this call (slave mode, verbose, ...) are preserved. The config clone
- * state machine starts inactive.
+ * Initialize the core context, load local CS2 config data and store the
+ * gateway I/O callbacks. The context must be zero-initialized by the
+ * caller; options parsed before this call (slave mode, verbose, ...) are
+ * preserved. The config clone state machine starts inactive.
  * Master mode: the 60113 start sequence is sent to the CAN bus first and
  * the periodic CAN member ping timer (PING_TIME seconds, serviced by
  * cs2_core_tick()) is armed. Slave mode: neither happens - the core only
- * answers pings. Returns -1 if the start frames could not be sent.
+ * answers pings. Returns -1 if paths are too long or start frames could
+ * not be sent.
  */
-int cs2_core_init(struct cs2_core_t *core, const struct cs2_core_io *io) {
+int cs2_core_init(struct cs2_core_t *core, const struct cs2_core_io *io, char *config_dir) {
+    char track_file[MAXLINE];
+    char loco_file[MAXLINE];
+    size_t dir_len;
+    int path_len;
+
     core->io = *io;
     core->cfg.state = CS2_STATE_INACTIVE;
     core->cfg.track_index = MAX_TRACK_PAGE;
     if (core->slave)
 	return 0;
+    if (!config_dir)
+	return -1;
+    if (!config_dir[0])
+	strcpy(config_dir, ".");
+    dir_len = strlen(config_dir);
+    if (config_dir[dir_len - 1] != '/') {
+	if (dir_len + 1 >= MAXLINE) {
+	    fprint_syslog(stderr, LOG_ERR, "config directory path is too long");
+	    return -1;
+	}
+	config_dir[dir_len++] = '/';
+	config_dir[dir_len] = '\0';
+    }
+    path_len = snprintf(track_file, sizeof(track_file), "%sgleisbild.cs2", config_dir);
+    if (path_len < 0 || (size_t)path_len >= sizeof(track_file)) {
+	fprint_syslog(stderr, LOG_ERR, "track config file path is too long");
+	return -1;
+    }
+    path_len = snprintf(loco_file, sizeof(loco_file), "%slokomotive.cs2", config_dir);
+    if (path_len < 0 || (size_t)path_len >= sizeof(loco_file)) {
+	fprint_syslog(stderr, LOG_ERR, "config file path is too long");
+	return -1;
+    }
+    if (!page_name) {
+	page_name = calloc(MAX_TRACK_PAGE, sizeof(char *));
+	if (!page_name) {
+	    fprint_syslog_wc(stderr, LOG_ERR, "can't allocate track page names:", strerror(errno));
+	    return -1;
+	}
+    }
+    core->cfg.page_name = calloc(MAX_TRACK_PAGE, sizeof(char *));
+    if (!core->cfg.page_name) {
+	fprint_syslog_wc(stderr, LOG_ERR, "can't allocate cloned track page names:", strerror(errno));
+	return -1;
+    }
+    core->cfg.dir = config_dir;
+    page_name = read_track_file(track_file, page_name);
+    if (read_loco_data(loco_file, CONFIG_FILE) != 0)
+	syslog(LOG_WARNING, "%s: can't read loco data from %s\n", __func__, loco_file);
     if (cs2_core_send_start_frames(core) < 0)
 	return -1;
     core->ping_timer = PING_TIME;

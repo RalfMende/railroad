@@ -33,9 +33,7 @@ static char *NET_UDP_FORMAT_STRG  = "      UDP->   0x%08X   [%d]";
 static char *PIDFILE = "/var/run/can2lan.pid";
 
 char config_dir[MAXLINE];
-char config_file[MAXLINE];
 char **page_name;
-char **cs2_page_name;
 int pidfd, do_loop = 1;
 
 static const int MAXPENDING = 16;       /* max outstanding tcp connections */
@@ -214,7 +212,6 @@ int main(int argc, char **argv) {
     char *bcast_interface;
     char *searchif;
     char *tempsp;
-    char *loco_file;
     struct cs2_core_t core = { 0 };	/* cs2_core_init() preserves the options parsed before it runs */
     struct cs2_core_io core_io;
     struct gw_io_ctx gw_io;
@@ -248,20 +245,6 @@ int main(int argc, char **argv) {
     core_io.tcp_config_send = gw_tcp_config_send;
     core_io.tcp_config_send_all = gw_tcp_config_send_all;
 
-    page_name = calloc(MAX_TRACK_PAGE, sizeof(char *));
-    if (!page_name) {
-	fprintf(stderr, "can't alloc memory for page_name: %s\n", strerror(errno));
-	exit(EXIT_FAILURE);
-    };
-
-    cs2_page_name = calloc(MAX_TRACK_PAGE, sizeof(char *));
-    if (!cs2_page_name) {
-	fprintf(stderr, "can't alloc memory for cs2_page_name: %s\n", strerror(errno));
-	exit(EXIT_FAILURE);
-    };
-
-    core.cfg.page_name = cs2_page_name;
-
     memset(ifr.ifr_name, 0, sizeof(ifr.ifr_name));
     strcpy(ifr.ifr_name, "can0");
     memset(config_dir, 0, sizeof(config_dir));
@@ -281,8 +264,6 @@ int main(int argc, char **argv) {
     timeout = MAX_UDP_BCAST_RETRY;
     strcpy(udp_dst_address, "255.255.255.255");
     strcpy(bcast_interface, "br-lan");
-
-    config_file[0] = '\0';
 
     while ((opt = getopt(argc, argv, "c:u:s:t:d:b:i:kT:x:gSmvhf?")) != -1) {
 	switch (opt) {
@@ -372,29 +353,6 @@ int main(int argc, char **argv) {
 	    exit(EXIT_FAILURE);
 	}
     }
-
-    /* read track file */
-    if (config_dir[0] == 0) {
-	strcat(config_file, ".");
-    }
-
-    strcat(config_file, config_dir);
-    if (config_dir[strlen(config_dir) - 1] != '/') {
-	strcat(config_file, "/");
-    }
-    strncpy(config_dir, config_file, sizeof(config_dir) - 1);
-    strcat(config_file, "gleisbild.cs2");
-
-    core.cfg.dir = config_dir;
-
-    page_name = read_track_file(config_file, page_name);
-
-    /* read loco data */
-    if (asprintf(&loco_file, "%s%s", config_dir, "lokomotive.cs2") < 0)
-	fprintf(stderr, "can't alloc buffer for loco_name: %s\n", strerror(errno));
-    else
-	read_loco_data(loco_file, CONFIG_FILE);
-    free(loco_file);
 
     /* we are trying to setup a UDP socket */
     if (udp_dst_address[0]) {
@@ -535,7 +493,7 @@ int main(int argc, char **argv) {
 
     /* init the CS2 core: in master mode this sends the 60113 start sequence
        and arms the periodic CAN member ping timer */
-    if (cs2_core_init(&core, &core_io))
+    if (cs2_core_init(&core, &core_io, config_dir))
 	exit(EXIT_FAILURE);
 
     /* daemonize the process if requested */
@@ -864,10 +822,14 @@ int main(int argc, char **argv) {
 	    }
 	}
     }
-    free_track_file(page_name);
-    free(page_name);
+    if (page_name)
+	free_track_file(page_name);
+    if (page_name != core.cfg.page_name)
+	free(page_name);
+    if (core.cfg.page_name != page_name)
+	free_track_file(core.cfg.page_name);
+    free(core.cfg.page_name);
     /* free(udp_dst_address); */
-    free(cs2_page_name);
     closelog();
     close(sc);
     close(sa);

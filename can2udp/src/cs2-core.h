@@ -62,10 +62,11 @@ extern unsigned char GETCONFIG[];
 extern unsigned char GETCONFIG_DATA[];
 extern char *cs2_configs[][2];
 
-/* initialize the core context; call after the command line options are parsed and the gateway I/O is ready.
-   The context must be zero-initialized by the caller. In master mode the 60113 start sequence is sent first
-   and the periodic CAN member ping timer is armed. Returns -1 if the start frames could not be sent. */
-int cs2_core_init(struct cs2_core_t *core, const struct cs2_core_io *io);
+/* initialize the core context and local CS2 config data; call after parsing options and preparing gateway I/O.
+   config_dir is normalized in place. The context must be zero-initialized by the caller. In master mode the
+   60113 start sequence is sent first and the periodic CAN member ping timer is armed. Returns -1 on path or
+   start-frame errors. */
+int cs2_core_init(struct cs2_core_t *core, const struct cs2_core_io *io, char *config_dir);
 /* 1-second tick from the gateway main loop: services the master-mode ping timer */
 void cs2_core_tick(struct cs2_core_t *core);
 int cs2_core_send_start_frames(struct cs2_core_t *core);
