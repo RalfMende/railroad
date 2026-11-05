@@ -30,8 +30,6 @@ static char *UDP_TCP_FORMAT_STRG  = "->UDP>TCP     0x%08X   [%d]";
 static char *UDP_UDP_FORMAT_STRG  = "->UDP>UDP     0x%08X   [%d]";
 static char *NET_UDP_FORMAT_STRG  = "      UDP->   0x%08X   [%d]";
 
-#define PING_TIME	10
-
 static char *PIDFILE = "/var/run/can2lan.pid";
 
 char config_dir[MAXLINE];
@@ -180,8 +178,8 @@ void print_usage(char *prg) {
     fprintf(stderr, "         -b <bcast_addr/int> broadcast address or interface - default 255.255.255.255/br-lan\n");
     fprintf(stderr, "         -i <can int>        CAN interface - default can0\n");
     fprintf(stderr, "         -k                  use a connected CAN member as config source\n");
-    fprintf(stderr, "         -g                  obsolete: use -S for slave mode)\n", PING_TIME);
-    fprintf(stderr, "         -S                  cs2-core acts like a central station in slave mode (default: master mode)\n", PING_TIME);
+    fprintf(stderr, "         -g                  obsolete: use -S for slave mode)\n");
+    fprintf(stderr, "         -S                  cs2-core acts like a central station in slave mode (default: master mode)\n");
     fprintf(stderr, "         -T                  timeout starting %s in sec - default %d sec\n", prg, MAX_UDP_BCAST_RETRY);
     fprintf(stderr, "         -m                  doing MS1 workaround - default: don't do it\n");
     fprintf(stderr, "         -x                  excluding mask/filter CAN->LAN e.g. \"0x00FF0000 0x00170000\"\n");
@@ -217,7 +215,7 @@ int main(int argc, char **argv) {
     char *searchif;
     char *tempsp;
     char *loco_file;
-    struct cs2_core_t core;
+    struct cs2_core_t core = { 0 };	/* cs2_core_init() preserves the options parsed before it runs */
     struct cs2_core_io core_io;
     struct gw_io_ctx gw_io;
     uint32_t id, mask;
@@ -228,7 +226,6 @@ int main(int argc, char **argv) {
     int local2_tcp_port = 15732;
     int destination_port = 15730;
     int background = 1;
-    int cs2ping_timer = 0;
     /* const int off = 0; */
     const int on = 1;
     uint32_t canid;
@@ -250,7 +247,6 @@ int main(int argc, char **argv) {
     core_io.can_enqueue = gw_can_enqueue;
     core_io.tcp_config_send = gw_tcp_config_send;
     core_io.tcp_config_send_all = gw_tcp_config_send_all;
-    cs2_core_init(&core, &core_io);
 
     page_name = calloc(MAX_TRACK_PAGE, sizeof(char *));
     if (!page_name) {
@@ -537,8 +533,9 @@ int main(int argc, char **argv) {
 
     gw_io.can_socket = sc;
 
-    /* start Maerklin 60113 box */
-    if (cs2_core_send_start_frames(&core))
+    /* init the CS2 core: in master mode this sends the 60113 start sequence
+       and arms the periodic CAN member ping timer */
+    if (cs2_core_init(&core, &core_io))
 	exit(EXIT_FAILURE);
 
     /* daemonize the process if requested */
@@ -589,8 +586,8 @@ int main(int argc, char **argv) {
     sigaction(SIGPIPE, &sigact, NULL);
     sigemptyset(&emptyset);
 
-    /* the select() timeout is set in the loop: 1 sec for the periodic CAN Ping,
-       shorter while CAN frames are waiting for their pacing time */
+    /* the select() timeout is set in the loop: 1 sec for the core's periodic
+       CAN member ping, shorter while CAN frames are waiting for their pacing time */
     FD_ZERO(&all_fds);
     FD_SET(sc, &all_fds);
     FD_SET(sa, &all_fds);
@@ -642,23 +639,8 @@ int main(int argc, char **argv) {
 	    /* woke up only because the next CAN frame is due */
 	    if (short_wait)
 		continue;
-	    /* send periodic ping (master mode only) */
-	    if (!core.slave)
-		cs2ping_timer++;
-	    if (cs2ping_timer >= PING_TIME) {
-		cs2ping_timer = 0;
-		print_can_frame(UDP_FORMAT_STRG, netframe, core.cfg.verbose && !background);
-		if (can_tx_enqueue(M_CAN_PING) < 0) {
-		    fprint_syslog(stderr, LOG_ERR, "can't send CAN ping");
-		}
-		for (i = 0; i <= max_tcp_i; i++) {	/* check all clients for data */
-		    tcp_socket = tcp_client[i];
-		    if (tcp_socket <= 0)
-			continue;
-		    net_to_net(tcp_socket, NULL, M_CAN_PING, CAN_ENCAP_SIZE);
-		    print_can_frame(CAN_TCP_FORMAT_STRG, M_CAN_PING, core.cfg.verbose && !background);
-		}
-	    }
+	    /* 1-second tick: services the core's master-mode ping timer */
+	    cs2_core_tick(&core);
 	    continue;
 	} else if (nready < 0) {
 	    if (!background)
@@ -758,8 +740,8 @@ int main(int argc, char **argv) {
 		max_fds = MAX(conn_fd, max_fds);	/* for select */
 		max_tcp_i = MAX(i, max_tcp_i);		/* max index in tcp_client[] array */
 		tcp_tx_register(conn_fd);		/* send queue of the new client */
-		/* send embedded CAN ping */
-		memcpy(netframe, M_CAN_PING, CAN_ENCAP_SIZE);
+		/* send embedded CAN member ping */
+		memcpy(netframe, M_CAN_MEMBER_PING, CAN_ENCAP_SIZE);
 		net_to_net(conn_fd, NULL, netframe, CAN_ENCAP_SIZE);
 		if (core.cfg.verbose && !background)
 		    printf("send embedded CAN ping\n");

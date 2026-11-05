@@ -22,13 +22,19 @@ static char *NET_TCP_FORMAT_STRG = "      TCP->   0x%08X   [%d]";
 
 static char *BROADCAST_C0NFIG_UPDATE = "broadcast_update.cs2";
 
-/* Gleisbox (60113) start sequence: magic frame + enable all loco protocols */
-static unsigned char M_GLEISBOX_MAGIC_START_SEQUENCE[] =
+/* master mode: interval of the periodic CAN member ping in seconds */
+#define PING_TIME 10
+
+/* command 0x1B "Bootloader CAN gebunden" (service), here with DLC 5 - sent
+   before every CAN member ping (the CS is observed sending it with DLC 0) */
+static unsigned char M_BOOTLOADER_CAN_BOUND[] =
     { 0x00, 0x36, 0x03, 0x01, 0x05, 0x00, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00 };
+/* Gleisbox (60113) start frame: enable all loco protocols */
 static unsigned char M_GLEISBOX_ALL_PROTO_ENABLE[] =
     { 0x00, 0x00, 0x03, 0x01, 0x06, 0x00, 0x00, 0x00, 0x00, 0x08, 0x07, 0x00, 0x00 };
-/* CAN member ping (also sent by the gateway to new TCP clients) */
-unsigned char M_CAN_PING[] =
+/* command 0x18 "Softwarestand Anfrage / Teilnehmer Ping", DLC 0: query all
+   CAN bus members (also sent by the gateway to new TCP clients) */
+unsigned char M_CAN_MEMBER_PING[] =
     { 0x00, 0x30, 0x47, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 /* fake CS2 ping answers of further bus members, sent in slave mode */
 static unsigned char M_CAN_PING_CS2_1[] =
@@ -74,31 +80,48 @@ char *ms2_configs[] = {
 extern char **page_name;
 
 /*
- * Initialize the core context and store the gateway I/O callbacks.
- * The config clone state machine starts inactive.
+ * Initialize the core context and store the gateway I/O callbacks. The
+ * context must be zero-initialized by the caller; options parsed before
+ * this call (slave mode, verbose, ...) are preserved. The config clone
+ * state machine starts inactive.
+ * Master mode: the 60113 start sequence is sent to the CAN bus first and
+ * the periodic CAN member ping timer (PING_TIME seconds, serviced by
+ * cs2_core_tick()) is armed. Slave mode: neither happens - the core only
+ * answers pings. Returns -1 if the start frames could not be sent.
  */
-void cs2_core_init(struct cs2_core_t *core, const struct cs2_core_io *io) {
-    memset(core, 0, sizeof(*core));
+int cs2_core_init(struct cs2_core_t *core, const struct cs2_core_io *io) {
     core->io = *io;
     core->cfg.state = CS2_STATE_INACTIVE;
     core->cfg.track_index = MAX_TRACK_PAGE;
+    if (core->slave)
+	return 0;
+    if (cs2_core_send_start_frames(core) < 0)
+	return -1;
+    core->ping_timer = PING_TIME;
+    return 0;
 }
 
 /*
- * Send the Gleisbox (60113) start sequence to the CAN bus: the magic start
- * frame followed by the frame enabling all loco protocols. Returns -1 if a
- * frame could not be sent.
+ * 1-second tick from the gateway main loop: services the master-mode ping
+ * timer armed by cs2_core_init(). When it elapses, the CAN member ping is
+ * sent and the timer is re-armed. Does nothing while the timer is not
+ * armed (slave mode).
+ */
+void cs2_core_tick(struct cs2_core_t *core) {
+    if (core->ping_timer <= 0)
+	return;
+    if (--core->ping_timer == 0) {
+	core->ping_timer = PING_TIME;
+	cs2_core_send_ping(core);
+    }
+}
+
+/*
+ * Send the Gleisbox (60113) start frame to the CAN bus: enable all loco
+ * protocols. Blocking (paced) - called before the gateway main loop runs.
+ * Returns -1 if the frame could not be sent.
  */
 int cs2_core_send_start_frames(struct cs2_core_t *core) {
-    if (core->io.can_send(core->io.arg, M_GLEISBOX_MAGIC_START_SEQUENCE) < 0) {
-	fprint_syslog(stderr, LOG_ERR, "can't send CAN magic 60113 start sequence");
-	return -1;
-    } else {
-	if (core->cfg.verbose) {
-	    printf("                CAN magic 60113 start written\n");
-	    print_can_frame(CAN_FORMAT_STRG, M_GLEISBOX_MAGIC_START_SEQUENCE, core->cfg.verbose);
-	}
-    }
     if (core->io.can_send(core->io.arg, M_GLEISBOX_ALL_PROTO_ENABLE) < 0) {
 	fprint_syslog(stderr, LOG_ERR, "can't enable all loco protos");
 	return -1;
@@ -112,18 +135,39 @@ int cs2_core_send_start_frames(struct cs2_core_t *core) {
     return 0;
 }
 
-/* Send a CAN member ping to the CAN bus. Returns -1 on send error. */
+/*
+ * Send a CAN member ping: the CAN-bound bootloader service frame (0x1B)
+ * and the ping itself (0x18) are queued for the CAN bus (paced,
+ * non-blocking - this is called from the gateway main loop), the ping
+ * additionally goes to all connected TCP clients. Returns -1 if a frame
+ * could not be sent.
+ */
 int cs2_core_send_ping(struct cs2_core_t *core) {
-    if (core->io.can_send(core->io.arg, M_CAN_PING) < 0) {
-	fprint_syslog(stderr, LOG_ERR, "can't send CAN Ping");
-	return -1;
+    int ret = 0;
+
+    if (core->io.can_enqueue(core->io.arg, M_BOOTLOADER_CAN_BOUND) < 0) {
+	fprint_syslog(stderr, LOG_ERR, "can't queue CAN bootloader service frame");
+	ret = -1;
     } else {
 	if (core->cfg.verbose) {
-	    /* printf("                CAN Ping sent\n"); */
-	    print_can_frame(CAN_FORMAT_STRG, M_CAN_PING, core->cfg.verbose);
+	    printf("                CAN bootloader service frame written\n");
+	    print_can_frame(CAN_FORMAT_STRG, M_BOOTLOADER_CAN_BOUND, core->cfg.verbose);
 	}
     }
-    return 0;
+    if (core->io.can_enqueue(core->io.arg, M_CAN_MEMBER_PING) < 0) {
+	fprint_syslog(stderr, LOG_ERR, "can't queue CAN ping");
+	ret = -1;
+    } else {
+	if (core->cfg.verbose)
+	    print_can_frame(CAN_FORMAT_STRG, M_CAN_MEMBER_PING, core->cfg.verbose);
+    }
+    if (core->io.tcp_send_all(core->io.arg, M_CAN_MEMBER_PING, CAN_ENCAP_SIZE) < 0) {
+	fprint_syslog(stderr, LOG_ERR, "can't send TCP ping");
+	ret = -1;
+    } else {
+	print_can_frame(NET_TCP_FORMAT_STRG, M_CAN_MEMBER_PING, core->cfg.verbose);
+    }
+    return ret;
 }
 
 /*

@@ -59,11 +59,15 @@ TCP_TX_QUEUE_MAX = 96 * 1024
 CRC, COMPRESSED, BCCHANGE = 0x01, 0x02, 0x04
 
 CAN_FRAME = struct.Struct("=IB3x8s")  # struct can_frame: 16 bytes
-M_CAN_PING = bytes([0x00, 0x30, 0x47, 0x11]) + bytes(9)
+# command 0x18 "Softwarestand Anfrage / Teilnehmer Ping", DLC 0 (M_CAN_MEMBER_PING in src/cs2-core.c)
+M_CAN_MEMBER_PING = bytes([0x00, 0x30, 0x47, 0x11]) + bytes(9)
 # ping answer of the slave mode (M_CAN_PING_CS2_3 in src/cs2-core.c):
 # response bit set, DLC 8, SW version 0x0402, device id 0xFFFF (CS2-GUI)
 M_CAN_PING_ANSWER = bytes([0x00, 0x31, 0x03, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x04, 0x02, 0xFF, 0xFF])
-PING_TIME = 10  # master mode ping interval in seconds (src/can2lan.c)
+# command 0x1B "Bootloader CAN gebunden" (service), sent with every periodic
+# ping in master mode (M_BOOTLOADER_CAN_BOUND in src/cs2-core.c)
+M_BOOTLOADER_CAN_BOUND = bytes([0x00, 0x36, 0x03, 0x01, 0x05, 0x00, 0x00, 0x00, 0x00, 0x11, 0x00, 0x00, 0x00])
+PING_TIME = 10  # master mode ping interval in seconds (src/cs2-core.c)
 
 BUILD = None
 LIB = None
@@ -709,7 +713,7 @@ class Gateway:
         sock.connect(("127.0.0.1", self.ports["tcp"]))
         sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.clients.append(sock)
-        self.test.assertEqual(recv_exact(sock, 13), M_CAN_PING, "embedded CAN ping on connect")
+        self.test.assertEqual(recv_exact(sock, 13), M_CAN_MEMBER_PING, "embedded CAN member ping on connect")
         return sock
 
 
@@ -718,9 +722,9 @@ class TestNativeGateway(unittest.TestCase):
 
     def setUp(self):
         self.gw = Gateway(self)
-        # the gateway starts the 60113 box first
-        start = [self.gw.bus_recv(), self.gw.bus_recv()]
-        self.assertEqual([f[0] & 0x1FFFFFFF if f else None for f in start], [0x00360301, 0x00000301])
+        # master mode: the gateway starts the 60113 box (enable all loco protocols)
+        start = self.gw.bus_recv()
+        self.assertEqual(start[0] & 0x1FFFFFFF if start else None, 0x00000301)
 
     # ---- UDP -> CAN
     def test_udp_frame_reaches_the_bus(self):
@@ -919,9 +923,13 @@ class TestNativeGateway(unittest.TestCase):
 
     # ---- master mode (default): periodic CAN member ping
     def test_master_sends_periodic_can_ping(self):
-        ping = self.gw.bus_recv(PING_TIME + 2.0)
-        self.assertIsNotNone(ping, "no periodic CAN member ping within %d s" % (PING_TIME + 2))
-        self.assertEqual(ping, frame_to_can(M_CAN_PING))
+        client = self.gw.connect()
+        bootloader = self.gw.bus_recv(PING_TIME + 2.0)
+        self.assertIsNotNone(bootloader, "no periodic CAN member ping within %d s" % (PING_TIME + 2))
+        self.assertEqual(bootloader, frame_to_can(M_BOOTLOADER_CAN_BOUND))
+        self.assertEqual(self.gw.bus_recv(), frame_to_can(M_CAN_MEMBER_PING))
+        # TCP clients get the ping as well
+        self.assertEqual(recv_exact(client, 13), M_CAN_MEMBER_PING)
 
     # ---- lifecycle
     def test_terminates_cleanly_on_sigterm(self):
@@ -935,9 +943,8 @@ class TestNativeGatewaySlave(unittest.TestCase):
 
     def setUp(self):
         self.gw = Gateway(self, args=("-S",))
-        # the gateway starts the 60113 box first
-        start = [self.gw.bus_recv(), self.gw.bus_recv()]
-        self.assertEqual([f[0] & 0x1FFFFFFF if f else None for f in start], [0x00360301, 0x00000301])
+        # slave mode: no 60113 start sequence - the core only answers pings
+        self.assertIsNone(self.gw.bus_recv(0.3), "slave must not send the 60113 start sequence")
 
     def test_slave_sends_no_periodic_ping(self):
         self.assertIsNone(self.gw.bus_recv(PING_TIME + 1.0),

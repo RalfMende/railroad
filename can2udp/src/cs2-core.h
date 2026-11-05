@@ -12,6 +12,8 @@
  *
  * The core never touches sockets itself - all CAN/UDP/TCP transmission
  * is delegated to the gateway (can2lan.c) through struct cs2_core_io.
+ * In master mode cs2_core_init() sends the 60113 start sequence and arms
+ * the periodic CAN member ping, which cs2_core_tick() then services.
  */
 
 #ifndef _CS2_CORE_H_
@@ -51,15 +53,21 @@ struct cs2_core_t {
     struct cs2_core_io io;
     int slave;				/* -S: slave mode - answer CAN member pings, don't send them */
     int ms1_workaround;			/* -m: fake cyclic MS1 slave monitoring response */
+    int ping_timer;			/* master mode: seconds until the next CAN member ping, 0 = not armed */
 };
 
 /* shared with the gateway (can2lan.c) and gio.c */
-extern unsigned char M_CAN_PING[];
+extern unsigned char M_CAN_MEMBER_PING[];
 extern unsigned char GETCONFIG[];
 extern unsigned char GETCONFIG_DATA[];
 extern char *cs2_configs[][2];
 
-void cs2_core_init(struct cs2_core_t *core, const struct cs2_core_io *io);
+/* initialize the core context; call after the command line options are parsed and the gateway I/O is ready.
+   The context must be zero-initialized by the caller. In master mode the 60113 start sequence is sent first
+   and the periodic CAN member ping timer is armed. Returns -1 if the start frames could not be sent. */
+int cs2_core_init(struct cs2_core_t *core, const struct cs2_core_io *io);
+/* 1-second tick from the gateway main loop: services the master-mode ping timer */
+void cs2_core_tick(struct cs2_core_t *core);
 int cs2_core_send_start_frames(struct cs2_core_t *core);
 int cs2_core_send_ping(struct cs2_core_t *core);
 /* answer a CAN member ping (slave mode): queued for the CAN bus, sent to UDP and all TCP clients */
