@@ -653,6 +653,14 @@ class TestNativeStreamReception(LibTestCase):
     def frames(self):
         return model_config_stream(self.CONTENT, 0x00420300)
 
+    def compressed_frames(self, compressed, inflated_size):
+        payload = inflated_size.to_bytes(4, "big") + compressed
+        padded = payload.ljust((len(payload) + 7) // 8 * 8, b"\0")
+        header = (bytes.fromhex("00420300") + b"\x06" + len(payload).to_bytes(4, "big")
+                  + crc_ccitt(padded).to_bytes(2, "big") + b"\0\0")
+        return [header] + [bytes.fromhex("0042030008") + padded[i:i + 8]
+                           for i in range(0, len(padded), 8)]
+
     def start_copy(self):
         sender, peer = socket.socketpair()
         self.addCleanup(sender.close)
@@ -709,6 +717,13 @@ class TestNativeStreamReception(LibTestCase):
         self.assertEqual(self.content(), b"")
         self.assertFalse(self.cfg.start or self.cfg.stream)
 
+    def test_valid_streams_with_varied_lengths_and_padding(self):
+        for size in (1, 7, 8, 9, 256, 4096):
+            with self.subTest(size=size):
+                content = bytes(i % 251 for i in range(size))
+                self.feed(model_config_stream(content, 0x00420300))
+                self.assertEqual(self.content(), content)
+
     def test_crc_error_does_not_replace_config_and_receiver_recovers(self):
         frames = self.frames()
         bad = bytearray(frames[-1])
@@ -734,6 +749,21 @@ class TestNativeStreamReception(LibTestCase):
         frames[0][9:11] = crc.to_bytes(2, "big")
         self.assert_copy_aborted(peer, [bytes(frame) for frame in frames])
         self.assertEqual(self.content(), self.ORIGINAL)
+
+    def test_copy_rejects_incomplete_or_wrong_length_zlib_streams(self):
+        compressed = zlib.compress(self.CONTENT)
+        cases = (("truncated", compressed[:-1], len(self.CONTENT)),
+                 ("length_too_large", compressed, len(self.CONTENT) + 1),
+                 ("length_too_small", compressed, len(self.CONTENT) - 1),
+                 ("zero_length", compressed, 0),
+                 ("trailing_bytes", compressed + b"\x01", len(self.CONTENT)))
+        for label, data, inflated_size in cases:
+            with self.subTest(case=label):
+                with open(self.path, "wb") as fp:
+                    fp.write(self.ORIGINAL)
+                peer = self.start_copy()
+                self.assert_copy_aborted(peer, self.compressed_frames(data, inflated_size))
+                self.assertEqual(self.content(), self.ORIGINAL)
 
     def test_copy_stops_when_config_file_cannot_be_opened(self):
         peer = self.start_copy()

@@ -262,9 +262,13 @@ class ReassembleData:
         if crc_ccitt(bytes(self.buf)) != self.crc:
             raise self.StreamAborted("CRC mismatch")
         inflated_size = int.from_bytes(self.buf[:4], "big")
-        content = zlib.decompress(bytes(self.buf[4:self.deflated_size]))
-        if len(content) != inflated_size:
-            raise self.StreamAborted("inflated size mismatch")
+        try:
+            decompressor = zlib.decompressobj()
+            content = decompressor.decompress(bytes(self.buf[4:self.deflated_size]))
+        except zlib.error as exc:
+            raise self.StreamAborted("invalid compressed data") from exc
+        if not decompressor.eof or decompressor.unused_data or len(content) != inflated_size:
+            raise self.StreamAborted("incomplete stream or size mismatch")
         return content
 
 

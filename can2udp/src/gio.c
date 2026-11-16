@@ -539,6 +539,9 @@ int inflate_data(struct cs2_config_data_t *config_data) {
     int ret;
     z_stream strm;
 
+    if (config_data->deflated_size < 4)
+	return Z_DATA_ERROR;
+
     strm.zalloc = Z_NULL;
     strm.zfree = Z_NULL;
     strm.opaque = Z_NULL;
@@ -547,24 +550,18 @@ int inflate_data(struct cs2_config_data_t *config_data) {
     ret = inflateInit(&strm);
     if (ret != Z_OK)
 	return ret;
-    strm.avail_in = config_data->deflated_size;
-    strm.avail_out = config_data->inflated_size;
+    strm.avail_in = config_data->deflated_size - 4;
+    strm.avail_out = config_data->inflated_size ? config_data->inflated_size : 1;
     strm.next_in = config_data->deflated_data + 4;
     strm.next_out = config_data->inflated_data;
-    ret = inflate(&strm, Z_NO_FLUSH);
-
-    assert(ret != Z_STREAM_ERROR);	/* state not clobbered */
-    switch (ret) {
-    case Z_NEED_DICT:
+    ret = inflate(&strm, Z_FINISH);
+    if (ret == Z_STREAM_END && strm.total_out == (unsigned int)config_data->inflated_size &&
+	strm.total_in == (unsigned int)(config_data->deflated_size - 4))
+	ret = Z_OK;
+    else if (ret >= Z_OK)
 	ret = Z_DATA_ERROR;
-    /* falls through */
-    case Z_DATA_ERROR:
-    case Z_MEM_ERROR:
-	(void)inflateEnd(&strm);
-	return ret;
-    }
     (void)inflateEnd(&strm);
-    return 0;
+    return ret;
 }
 
 char *search_interface(char *search) {
@@ -761,7 +758,8 @@ int reassemble_data(struct cs2_config_data_t *config_data, unsigned char *netfra
 		return 0;
 	    }
 	    config_data->inflated_size = temp;
-	    config_data->inflated_data = realloc(config_data->inflated_data, config_data->inflated_size);
+	    config_data->inflated_data = realloc(config_data->inflated_data,
+						 config_data->inflated_size ? config_data->inflated_size : 1);
 	    if (config_data->inflated_data == NULL) {
 		fprintf(stderr, "can't malloc inflated config data buffer - size 0x%04x\n", config_data->inflated_size);
 		exit(EXIT_FAILURE);
