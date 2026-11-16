@@ -598,11 +598,17 @@ char *search_interface(char *search) {
 int config_write(struct cs2_config_data_t *config_data) {
     FILE *config_fp;
     uint16_t crc;
-    int i;
+    int i, write_error = 0, saved_errno = 0;
+    size_t written;
     char *filename;
 
     if (config_data->name == NULL) {
 	fprintf(stderr, "\nunexpected config data stream received\n");
+	syslog(LOG_ERR, "%s: unexpected config data stream received\n", __func__);
+	free(config_data->deflated_data);
+	config_data->deflated_data = NULL;
+	free(config_data->inflated_data);
+	config_data->inflated_data = NULL;
 	return 0;
     }
 
@@ -665,14 +671,26 @@ int config_write(struct cs2_config_data_t *config_data) {
 	}
 	printf("\n");
     }
-    fwrite(config_data->inflated_data, 1, config_data->inflated_size, config_fp);
-    fclose(config_fp);
+    errno = 0;
+    written = fwrite(config_data->inflated_data, 1, config_data->inflated_size, config_fp);
+    if (written != (size_t)config_data->inflated_size || ferror(config_fp)) {
+	write_error = 1;
+	saved_errno = errno ? errno : EIO;
+    }
+    if (fclose(config_fp) != 0 && !write_error) {
+	write_error = 1;
+	saved_errno = errno ? errno : EIO;
+    }
+    if (write_error) {
+	fprintf(stderr, "\n%s: can't write file %s: %s\n", __func__, filename, strerror(saved_errno));
+	syslog(LOG_ERR, "%s: can't write file %s: %s\n", __func__, filename, strerror(saved_errno));
+    }
     free(filename);
     free(config_data->deflated_data);
     config_data->deflated_data = NULL;
     free(config_data->inflated_data);
     config_data->inflated_data = NULL;
-    return 1;
+    return !write_error;
 }
 
 int reassemble_data(struct cs2_config_data_t *config_data, unsigned char *netframe) {
@@ -770,12 +788,11 @@ int reassemble_data(struct cs2_config_data_t *config_data, unsigned char *netfra
 	    if (config_data->deflated_size_counter <= 8) {
 		config_data->stream = 0;
 		config_data->deflated_stream_size = config_data->ddi;
-		config_write(config_data);
-		/* if (config_data->inflated_data)
-		    free(config_data->inflated_data);
-		if (config_data->deflated_data)
-		    free(config_data->deflated_data);
-		*/
+		if (!config_write(config_data)) {
+		    syslog(LOG_ERR, "%s: abort config copy after stream processing failed\n", __func__);
+		    config_data->state = CS2_STATE_INACTIVE;
+		    return 0;
+		}
 		/* TODO next */
 		state = config_data->state;
 		switch (state) {

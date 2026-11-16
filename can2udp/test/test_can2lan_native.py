@@ -653,6 +653,25 @@ class TestNativeStreamReception(LibTestCase):
     def frames(self):
         return model_config_stream(self.CONTENT, 0x00420300)
 
+    def start_copy(self):
+        sender, peer = socket.socketpair()
+        self.addCleanup(sender.close)
+        self.addCleanup(peer.close)
+        self.cfg.state = 1  # CS2_STATE_NORMAL_CONFIG
+        self.cfg.next = 0
+        self.cfg.cs2_tcp_socket = sender.fileno()
+        return peer
+
+    def assert_copy_aborted(self, peer, frames):
+        self.assertEqual(self.feed(frames)[-1], 0)
+        self.assertEqual(self.cfg.state, 0)
+        self.assertEqual(self.cfg.next, 0)
+        self.assertFalse(self.cfg.start or self.cfg.stream)
+        self.assertFalse(self.cfg.deflated_data or self.cfg.inflated_data)
+        peer.settimeout(0.2)
+        with self.assertRaises(socket.timeout):
+            peer.recv(1)
+
     def test_valid_stream_writes_config(self):
         self.feed(self.frames())
         self.assertEqual(self.content(), self.CONTENT)
@@ -698,6 +717,50 @@ class TestNativeStreamReception(LibTestCase):
         self.assertEqual(self.content(), self.ORIGINAL)
         self.feed(frames)
         self.assertEqual(self.content(), self.CONTENT)
+
+    def test_copy_stops_after_crc_error(self):
+        peer = self.start_copy()
+        frames = self.frames()
+        bad = bytearray(frames[-1])
+        bad[-1] ^= 1
+        self.assert_copy_aborted(peer, frames[:-1] + [bytes(bad)])
+        self.assertEqual(self.content(), self.ORIGINAL)
+
+    def test_copy_stops_after_decompression_error(self):
+        peer = self.start_copy()
+        frames = [bytearray(frame) for frame in self.frames()]
+        frames[1][9] = 0xFF
+        crc = crc_ccitt(b"".join(frame[5:13] for frame in frames[1:]))
+        frames[0][9:11] = crc.to_bytes(2, "big")
+        self.assert_copy_aborted(peer, [bytes(frame) for frame in frames])
+        self.assertEqual(self.content(), self.ORIGINAL)
+
+    def test_copy_stops_when_config_file_cannot_be_opened(self):
+        peer = self.start_copy()
+        self.cfg.name = b"missing/lokomotive.cs2"
+        self.assert_copy_aborted(peer, self.frames())
+        self.assertEqual(self.content(), self.ORIGINAL)
+
+    def test_copy_stops_when_config_name_is_missing(self):
+        peer = self.start_copy()
+        self.cfg.name = None
+        self.assert_copy_aborted(peer, self.frames())
+        self.assertEqual(self.content(), self.ORIGINAL)
+
+    def test_copy_stops_when_file_write_or_close_fails(self):
+        peer = self.start_copy()
+        os.unlink(self.path)
+        os.symlink("/dev/full", self.path)
+        self.assert_copy_aborted(peer, self.frames())
+
+    def test_successful_copy_requests_next_config(self):
+        peer = self.start_copy()
+        self.assertEqual(self.feed(self.frames())[-1], 1)
+        self.assertEqual(self.content(), self.CONTENT)
+        self.assertEqual(recv_exact(peer, 13),
+                         bytes([0x00, 0x40, 0xAF, 0x7E, 0x08]) + b"mags\0\0\0\0")
+        self.assertEqual(self.cfg.state, 1)
+        self.assertEqual(self.cfg.next, 1)
 
     def test_invalid_dlc_aborts_and_ignores_remaining_frames(self):
         frames = self.frames()
