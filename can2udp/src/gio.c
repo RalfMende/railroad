@@ -918,8 +918,9 @@ static void strm_init(z_stream * strm) {
     CALL_ZLIB(deflateInit2(strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED, windowBits, 8, Z_DEFAULT_STRATEGY));
 }
 
-int send_tcp_config_data(char *filename, char *config_dir, uint32_t canid,
-			 int *tcp_socket_list, int socket_nmbr, int flags, uint8_t fill) {
+static int send_config_data(char *filename, char *config_dir, uint32_t canid,
+			    int *socket_list, int socket_nmbr, int flags, uint8_t fill,
+			    struct sockaddr *udp_addr) {
     uint32_t temp32, canid_be, nbytes = 0;
     uint8_t *config;
     uint8_t *out;
@@ -943,6 +944,7 @@ int send_tcp_config_data(char *filename, char *config_dir, uint32_t canid,
 	if (out == NULL) {
 	    fprintf(stderr, "%s: error calloc failed creating deflation buffer\n", __func__);
 	    syslog(LOG_ERR, "%s: error calloc failed creating deflation buffer\n", __func__);
+	    free(config);
 	    return -1;
 	}
 	strm_init(&strm);
@@ -984,7 +986,7 @@ int send_tcp_config_data(char *filename, char *config_dir, uint32_t canid,
 
 	// repeat from here in case of broadcast
 	for (int sn = 0; sn < socket_nmbr; sn++) {	/* check all clients for data */
-	    if (tcp_socket_list[sn] < 0)
+	    if (socket_list[sn] < 0)
 		continue;
 
 	    memcpy(&netframe[0], &canid_be, 4);
@@ -1000,10 +1002,9 @@ int send_tcp_config_data(char *filename, char *config_dir, uint32_t canid,
 		netframe[4] = 0x07;
 		netframe[11] = fill;
 	    }
-	    /* the frames are only queued: a client which can't take the whole stream is
-	       closed by the main loop, the other clients still get theirs */
-	    if (net_to_net(tcp_socket_list[sn], NULL, netframe, CAN_ENCAP_SIZE)) {
-		syslog(LOG_ERR, "%s: can't queue config stream for client fd %d\n", __func__, tcp_socket_list[sn]);
+	    /* TCP frames are queued; UDP frames are sent individually. */
+	    if (net_to_net(socket_list[sn], udp_addr, netframe, CAN_ENCAP_SIZE)) {
+		syslog(LOG_ERR, "%s: can't send config stream header for fd %d\n", __func__, socket_list[sn]);
 		rc = -1;
 		continue;
 	    }
@@ -1023,11 +1024,10 @@ int send_tcp_config_data(char *filename, char *config_dir, uint32_t canid,
 		    i += 8;
 		    src_i += 8;
 		    n_packets++;
-		} while ((src_i < padded_nbytes) && (n_packets < MAX_PACKETS));
+		} while ((src_i < padded_nbytes) && (n_packets < (udp_addr ? 1 : MAX_PACKETS)));
 
-		/* don't use frame_to_net because we have more then 13 (CAN_ENCAP_SIZE) bytes to send */
-		if (net_to_net(tcp_socket_list[sn], NULL, netframe, i)) {
-		    syslog(LOG_ERR, "%s: can't queue config stream for client fd %d\n", __func__, tcp_socket_list[sn]);
+		if (net_to_net(socket_list[sn], udp_addr, netframe, i)) {
+		    syslog(LOG_ERR, "%s: can't send config stream data for fd %d\n", __func__, socket_list[sn]);
 		    rc = -1;
 		    break;
 		}
@@ -1047,4 +1047,17 @@ int send_tcp_config_data(char *filename, char *config_dir, uint32_t canid,
 	free(out);
     }
     return rc;
+}
+
+int send_tcp_config_data(char *filename, char *config_dir, uint32_t canid,
+			 int *tcp_socket_list, int socket_nmbr, int flags, uint8_t fill) {
+    return send_config_data(filename, config_dir, canid, tcp_socket_list, socket_nmbr, flags, fill, NULL);
+}
+
+int send_udp_config_data(char *filename, char *config_dir, uint32_t canid, int udp_socket, struct sockaddr *udp_addr) {
+    if (udp_socket < 0 || !udp_addr) {
+	syslog(LOG_ERR, "%s: invalid UDP socket or missing destination\n", __func__);
+	return -1;
+    }
+    return send_config_data(filename, config_dir, canid, &udp_socket, 1, CRC | COMPRESSED, 0, udp_addr);
 }

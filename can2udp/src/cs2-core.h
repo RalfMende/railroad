@@ -39,6 +39,8 @@ struct cs2_core_io {
     int (*can_send)(void *arg, unsigned char *frame);
     /* queue a 13-byte CAN frame for the CAN bus (non-blocking, paced by the gateway's main loop) */
     int (*can_enqueue)(void *arg, unsigned char *frame);
+    /* send a config file as individual UDP config data frames */
+    int (*udp_config_send)(void *arg, char *name, uint32_t canid);
     /* send a config file as (compressed) config data stream to TCP clients */
     int (*tcp_config_send)(void *arg, char *name, uint32_t canid, int *tcp_socket_list, int socket_nmbr, int flags,
 			   uint8_t fill);

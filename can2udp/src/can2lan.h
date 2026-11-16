@@ -150,6 +150,7 @@ int time_stamp(char *timestamp);
 uint16_t generateHash(uint32_t uid);
 char **read_track_file(char *filename, char **page_name);
 int send_tcp_config_data(char *filename, char *config_dir, uint32_t canid, int *tcp_socket_list, int socket_nmbr, int flags, uint8_t fill);
+int send_udp_config_data(char *filename, char *config_dir, uint32_t canid, int udp_socket, struct sockaddr *udp_addr);
 void print_can_frame(char *format_string, unsigned char *netframe, int verbose);
 int net_to_net(int net_socket, struct sockaddr *net_addr, unsigned char *netframe, int length);
 int frame_to_can(int can_socket, unsigned char *netframe);

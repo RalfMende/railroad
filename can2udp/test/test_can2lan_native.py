@@ -916,6 +916,53 @@ class TestNativeGateway(unittest.TestCase):
         self.assertEqual(seq_of(recv_exact(client, 13)), 3)
 
     # ---- config data
+    def test_udp_config_requests_are_answered_as_datagrams(self):
+        client = self.gw.connect()
+        for name, filename in ((b"loks", "lokomotive.cs2"),
+                               (b"mags", "magnetartikel.cs2"),
+                               (b"gbs", "gleisbild.cs2"),
+                               (b"gbs-0", "gleisbilder/karben.cs2"),
+                               (b"fs", "fahrstrassen.cs2"),
+                               (b"lokstat", "lokomotive.sr2"),
+                               (b"magstat", "magnetartikel.sr2"),
+                               (b"gbsstat", "gleisbild.sr2"),
+                               (b"fsstat", "fahrstrassen.sr2")):
+            with self.subTest(name=name):
+                request = bytes([0x00, 0x40, 0x12, 0x34, 0x08]) + name.ljust(8, b"\0")
+                with open(os.path.join(CONFIG_DIR, filename), "rb") as fp:
+                    expected = model_config_stream(fp.read(), 0x00401234)
+                self.gw.udp_send(request)
+                self.assertEqual(self.gw.udp_recv(), bytes([0x00, 0x41]) + request[2:])
+                self.assertEqual([self.gw.udp_recv() for _ in expected], expected)
+                self.assertEqual(self.gw.bus_recv(), frame_to_can(request))
+        self.assertIsNone(self.gw.bus_recv(0.2))
+        self.assertIsNone(self.gw.udp_recv(0.2))
+        client.settimeout(0.2)
+        with self.assertRaises(socket.timeout):
+            client.recv(1)
+
+    def test_udp_unknown_config_request_has_no_stream(self):
+        request = bytes([0x00, 0x40, 0x12, 0x34, 0x08]) + b"unknown\0"
+        self.gw.udp_send(request)
+        self.assertEqual(self.gw.udp_recv(), bytes([0x00, 0x41]) + request[2:])
+        self.assertEqual(self.gw.bus_recv(), frame_to_can(request))
+        self.assertIsNone(self.gw.udp_recv(0.2))
+
+    def test_udp_config_request_with_invalid_dlc_is_not_answered(self):
+        request = bytes([0x00, 0x40, 0x12, 0x34, 0x07]) + b"loks\0\0\0\0"
+        self.gw.udp_send(request)
+        self.assertEqual(self.gw.bus_recv(), frame_to_can(request))
+        self.assertIsNone(self.gw.udp_recv(0.2))
+
+    def test_tcp_track_page_request_is_answered_with_a_stream(self):
+        client = self.gw.connect()
+        request = bytes([0x00, 0x40, 0x12, 0x34, 0x08]) + b"gbs-0\0\0\0"
+        client.sendall(request)
+        self.assertEqual(recv_exact(client, 13), bytes([0x00, 0x41]) + request[2:])
+        with open(os.path.join(CONFIG_DIR, "gleisbilder", "karben.cs2"), "rb") as fp:
+            expected = model_config_stream(fp.read(), 0x00401234)
+        self.assertEqual(split_frames(recv_exact(client, len(expected) * 13)), expected)
+
     def test_config_request_is_answered_with_a_stream(self):
         client = self.gw.connect()
         request = bytes([0x00, 0x40, 0x12, 0x34, 0x08]) + b"loks\0\0\0\0"
@@ -984,6 +1031,12 @@ class TestNativeGatewaySlave(unittest.TestCase):
     def test_slave_sends_no_periodic_ping(self):
         self.assertIsNone(self.gw.bus_recv(PING_TIME + 1.0),
                           "slave must not send the periodic CAN member ping")
+
+    def test_slave_does_not_answer_udp_config_requests(self):
+        request = bytes([0x00, 0x40, 0x12, 0x34, 0x08]) + b"loks\0\0\0\0"
+        self.gw.udp_send(request)
+        self.assertEqual(self.gw.bus_recv(), frame_to_can(request))
+        self.assertIsNone(self.gw.udp_recv(0.2))
 
     def test_slave_answers_can_ping_on_all_transports(self):
         client = self.gw.connect()

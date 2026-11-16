@@ -311,6 +311,18 @@ void cs2_core_handle_can_frame(struct cs2_core_t *core, struct can_frame *frame)
     cs2_core_handle_frame(core, CS2_SRC_CAN, -1, netframe);
 }
 
+static void cs2_core_send_config(struct cs2_core_t *core, enum cs2_core_source src,
+				 int tcp_socket, char *name, uint32_t canid) {
+    int ret;
+
+    if (src == CS2_SRC_UDP)
+	ret = core->io.udp_config_send(core->io.arg, name, canid);
+    else
+	ret = core->io.tcp_config_send(core->io.arg, name, canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
+    if (ret < 0)
+	syslog(LOG_ERR, "%s: failed to send config stream for %s\n", __func__, name);
+}
+
 /*
  * Logical processing of a received 13-byte frame, regardless of whether it
  * arrived via UDP, TCP or the CAN bus: answer CAN member pings (in slave
@@ -420,8 +432,14 @@ void cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, in
 		syslog(LOG_NOTICE, "%s %d: copy config request\n", __func__, __LINE__);
 		core->cfg.cs2_config_copy = 1;
 		cs2_core_copy_config(core);
+		break;
 	    }
-	    break;
+	    if (core->slave)
+		break;
+	    if (netframe[4] != 8) {
+		syslog(LOG_WARNING, "%s: ignoring UDP config request with DLC %u\n", __func__, netframe[4]);
+		break;
+	    }
 	}
 	/* check for special copy request */
 	if (canid == 0x0040af7e) {
@@ -438,56 +456,69 @@ void cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, in
 	    config_name[8] = '\0';
 	    syslog(LOG_NOTICE, "%s: config request >%s<\n", __func__, config_name);
 	    if (core->cfg.verbose)
-		printf("%s ID 0x%08x %s\n", __func__, canid, (char *)&netframe[5]);
+		printf("%s ID 0x%08x %s\n", __func__, canid, config_name);
 	    netframe[1] |= 1;
-	    core->io.tcp_send(core->io.arg, tcp_socket, netframe, CAN_ENCAP_SIZE);
+	    if (src == CS2_SRC_UDP) {
+		if (core->io.udp_send(core->io.arg, netframe, CAN_ENCAP_SIZE) < 0) {
+		    syslog(LOG_ERR, "%s: failed to send UDP config acknowledgement\n", __func__);
+		    break;
+		}
+	    } else {
+		core->io.tcp_send(core->io.arg, tcp_socket, netframe, CAN_ENCAP_SIZE);
+	    }
 	    if (strcmp("loks", config_name) == 0) {
 		syslog(LOG_NOTICE, "%s: sending lokomotive.cs2\n", __func__);
-		core->io.tcp_config_send(core->io.arg, "lokomotive.cs2", canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
+		cs2_core_send_config(core, src, tcp_socket, "lokomotive.cs2", canid);
 		break;
 	    } else if (strcmp("mags", config_name) == 0) {
 		syslog(LOG_NOTICE, "%s: sending magnetartikel.cs2\n", __func__);
-		core->io.tcp_config_send(core->io.arg, "magnetartikel.cs2", canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
+		cs2_core_send_config(core, src, tcp_socket, "magnetartikel.cs2", canid);
 		break;
 	    } else if (strncmp("gbs-", config_name, 4) == 0) {
-		int page_number;
-		page_number = atoi(&config_name[4]);
-		if ((page_number >= 0) && (page_number < MAX_TRACK_PAGE) && page_name[page_number]) {
+		char *end;
+		long page_number = strtol(&config_name[4], &end, 10);
+		if (isdigit((unsigned char)config_name[4]) && *end == '\0' &&
+		    page_number < MAX_TRACK_PAGE && page_name && page_name[page_number]) {
+		    int path_len = snprintf(gbs_name, sizeof(gbs_name), "gleisbilder/%s", page_name[page_number]);
+		    if (path_len < 0 || (size_t)path_len >= sizeof(gbs_name)) {
+			syslog(LOG_ERR, "%s: track page path is too long\n", __func__);
+			break;
+		    }
 		    syslog(LOG_NOTICE, "%s: sending %s\n", __func__, gbs_name);
-		    core->io.tcp_config_send(core->io.arg, gbs_name, canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
+		    cs2_core_send_config(core, src, tcp_socket, gbs_name, canid);
 		    break;
 		}
-		syslog(LOG_NOTICE, "%s: cant't send gbs-%d\n", __func__, page_number);
+		syslog(LOG_NOTICE, "%s: can't send config page %s\n", __func__, config_name);
 		break;
 	    } else if (strcmp("gbs", config_name) == 0) {
 		syslog(LOG_NOTICE, "%s: sending gleisbild.cs2\n", __func__);
-		core->io.tcp_config_send(core->io.arg, "gleisbild.cs2", canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
+		cs2_core_send_config(core, src, tcp_socket, "gleisbild.cs2", canid);
 		break;
 	    } else if (strcmp("fs", config_name) == 0) {
 		syslog(LOG_NOTICE, "%s: sending fahrstrassen.cs2\n", __func__);
-		core->io.tcp_config_send(core->io.arg, "fahrstrassen.cs2", canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
+		cs2_core_send_config(core, src, tcp_socket, "fahrstrassen.cs2", canid);
 		break;
 	    }
 	    /* TODO : these files depends on different internal states */
 	    else if (strcmp("lokstat", config_name) == 0) {
 		/* fprintf(stderr, "%s: lokstat (lokomotive.sr2) not implemented yet\n", __func__); */
 		syslog(LOG_NOTICE, "%s: sending lokomotive.sr2\n", __func__);
-		core->io.tcp_config_send(core->io.arg, "lokomotive.sr2", canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
+		cs2_core_send_config(core, src, tcp_socket, "lokomotive.sr2", canid);
 		break;
 	    } else if (strcmp("magstat", config_name) == 0) {
 		/* fprintf(stderr, "%s: magstat (magnetartikel.sr2) not implemented yet\n\n", __func__); */
 		syslog(LOG_NOTICE, "%s: sending magnetartikel.sr2\n", __func__);
-		core->io.tcp_config_send(core->io.arg, "magnetartikel.sr2", canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
+		cs2_core_send_config(core, src, tcp_socket, "magnetartikel.sr2", canid);
 		break;
 	    } else if (strcmp("gbsstat", config_name) == 0) {
 		/* fprintf(stderr, "%s: gbsstat (gleisbild.sr2) not implemented yet\n\n", __func__); */
 		syslog(LOG_NOTICE, "%s: sending gleisbild.sr2\n", __func__);
-		core->io.tcp_config_send(core->io.arg, "gleisbild.sr2", canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
+		cs2_core_send_config(core, src, tcp_socket, "gleisbild.sr2", canid);
 		break;
 	    } else if (strcmp("fsstat", config_name) == 0) {
 		/* fprintf(stderr, "%s: fsstat (fahrstrassen.sr2) not implemented yet\n\n", __func__); */
 		syslog(LOG_NOTICE, "%s: sending fahrstrassen.sr2\n", __func__);
-		core->io.tcp_config_send(core->io.arg, "fahrstrassen.sr2", canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
+		cs2_core_send_config(core, src, tcp_socket, "fahrstrassen.sr2", canid);
 		break;
 	    }
 	    break;
