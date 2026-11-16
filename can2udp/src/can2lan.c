@@ -106,7 +106,6 @@ struct gw_io_ctx {
     int can_socket;		/* CAN socket */
     int *tcp_clients;		/* TCP client socket array */
     int *tcp_client_max;	/* index of the last used entry in tcp_clients */
-    int verbose;
 };
 
 static int gw_udp_send(void *arg, unsigned char *frame, int len) {
@@ -140,23 +139,6 @@ static int gw_can_send(void *arg, unsigned char *frame) {
 static int gw_can_enqueue(void *arg, unsigned char *frame) {
     (void)arg;
     return can_tx_enqueue(frame);
-}
-
-static int gw_can_forward(void *arg, struct can_frame *frame) {
-    struct gw_io_ctx *io = (struct gw_io_ctx *)arg;
-    int i, ret = 0;
-
-    if (frame_to_net(io->udp_socket, io->udp_baddr, frame) < 0)
-	ret = -1;
-    print_can_frame(UDP_FORMAT_STRG, netframe, io->verbose);
-    for (i = 0; i <= *io->tcp_client_max; i++) {
-	if (io->tcp_clients[i] < 0)
-	    continue;
-	if (frame_to_net(io->tcp_clients[i], NULL, frame) < 0)
-	    ret = -1;
-	print_can_frame(CAN_TCP_FORMAT_STRG, netframe, io->verbose);
-    }
-    return ret;
 }
 
 static int gw_tcp_config_send(void *arg, char *name, uint32_t canid, int *tcp_socket_list, int socket_nmbr, int flags, uint8_t fill) {
@@ -195,7 +177,7 @@ void print_usage(char *prg) {
 }
 
 int main(int argc, char **argv) {
-	int n, i, j, max_fds, opt, max_tcp_i, nready, conn_fd, timeout, tcp_client[MAX_TCP_CONN], tcp_client2[MAX_TCP_CONN];
+	int n, i, j, max_fds, opt, max_tcp_i, nready, conn_fd, timeout, ret, tcp_client[MAX_TCP_CONN], tcp_client2[MAX_TCP_CONN];
     struct sigaction sigact;
     sigset_t blockset, emptyset;
     struct can_frame frame;
@@ -250,7 +232,6 @@ int main(int argc, char **argv) {
     core_io.tcp_send_all = gw_tcp_send_all;
     core_io.can_send = gw_can_send;
     core_io.can_enqueue = gw_can_enqueue;
-    core_io.can_forward = gw_can_forward;
     core_io.tcp_config_send = gw_tcp_config_send;
     core_io.tcp_config_send_all = gw_tcp_config_send_all;
 
@@ -362,8 +343,6 @@ int main(int argc, char **argv) {
 	    exit(EXIT_FAILURE);
 	}
     }
-
-    gw_io.verbose = core.cfg.verbose && !background;
 
     /* we are trying to setup a UDP socket */
     if (udp_dst_address[0]) {
@@ -635,14 +614,31 @@ int main(int argc, char **argv) {
 		syslog(LOG_ERR, "%s: reading CAN frame error: %s\n", __func__, strerror(errno));
 	    }
 	    /* if CAN Frame is EFF do it - but never forward the previous frame again after a failed read */
-	    if (n == (int)sizeof(struct can_frame))
+	    if ((n == (int)sizeof(struct can_frame)) && (frame.can_id & CAN_EFF_FLAG)) {	/* only EFF frames are valid */
+		/* the core logically processes the frame and answers requests */
 		cs2_core_handle_can_frame(&core, &frame);
+		/* send UDP frame */
+		frame_to_net(sb, (struct sockaddr *)&baddr, (struct can_frame *)&frame);
+		print_can_frame(UDP_FORMAT_STRG, netframe, core.cfg.verbose && !background);
+		/* send CAN frame to all connected TCP clients */
+		/* TODO: need all clients the packets ? */
+		for (i = 0; i <= max_tcp_i; i++) {	/* check all clients for data */
+		    tcp_socket = tcp_client[i];
+		    if (tcp_socket < 0)
+			continue;
+		    frame_to_net(tcp_socket, (struct sockaddr *)&tcp_addr, (struct can_frame *)&frame);
+		    print_can_frame(CAN_TCP_FORMAT_STRG, netframe, core.cfg.verbose && !background);
+		}
+	    }
 	}
 	/* received a UDP packet */
 	if (FD_ISSET(sa, &read_fds)) {
 	    if (read(sa, netframe, MAXDG) == CAN_ENCAP_SIZE) {
+		/* queue the packet for the CAN bus (the queue has room: sa isn't read when it is full) */
+		ret = can_tx_enqueue(netframe);
 		print_can_frame(NET_UDP_FORMAT_STRG, netframe, core.cfg.verbose && !background);
-		cs2_core_handle_udp_frame(&core, netframe);
+		/* the core logically processes the frame and answers requests */
+		cs2_core_handle_frame(&core, CS2_SRC_UDP, -1, netframe);
 	    }
 	}
 	/* received a TCP packet */
@@ -749,10 +745,15 @@ int main(int argc, char **argv) {
 		    int nframes = tcp_rx_feed(&tcp_rx[i], netframe, n, tcp_frames, sizeof(tcp_frames) / CAN_ENCAP_SIZE);
 		    for (j = 0; j < nframes; j++) {
 			unsigned char *frame = &tcp_frames[j * CAN_ENCAP_SIZE];
-			if (!cs2_core_handle_tcp_frame(&core, tcp_socket, frame)) {
-			    print_can_frame(j ? TCP_FORMATS_STRG : TCP_FORMAT_STRG, frame,
-					    core.cfg.verbose && !background);
-			    print_can_frame(UDP_FORMAT_STRG, frame, core.cfg.verbose && !background);
+			/* the core logically processes the frame and answers requests;
+			   it may adjust the frame before forwarding (MS1 workaround) */
+			cs2_core_handle_frame(&core, CS2_SRC_TCP, tcp_socket, frame);
+			ret = can_tx_enqueue(frame);
+			if (!ret) {
+			    if (j > 0)
+				print_can_frame(TCP_FORMATS_STRG, frame, core.cfg.verbose && !background);
+			    else
+				print_can_frame(TCP_FORMAT_STRG, frame, core.cfg.verbose && !background);
 			}
 		    }
 		}

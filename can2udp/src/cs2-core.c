@@ -294,66 +294,47 @@ int cs2_core_copy_config(struct cs2_core_t *core) {
     return 0;
 }
 
-int cs2_core_handle_can_frame(struct cs2_core_t *core, struct can_frame *frame) {
+/*
+ * Logical processing of a frame received from the CAN bus: convert it to
+ * the 13-byte network format and let cs2_core_handle_frame() answer
+ * requests. Forwarding to UDP/TCP is done by the gateway.
+ */
+void cs2_core_handle_can_frame(struct cs2_core_t *core, struct can_frame *frame) {
     unsigned char netframe[CAN_ENCAP_SIZE];
     uint32_t canid;
 
-    if (!(frame->can_id & CAN_EFF_FLAG))
-	return 0;
     memset(netframe, 0, CAN_ENCAP_SIZE);
     canid = htonl(frame->can_id & CAN_EFF_MASK);
     memcpy(netframe, &canid, 4);
     netframe[4] = frame->can_dlc;
     memcpy(&netframe[5], frame->data, 8);
-    if (cs2_core_handle_frame(core, CS2_SRC_CAN, -1, netframe))
-	return 1;
-    return core->io.can_forward(core->io.arg, frame);
-}
-
-int cs2_core_handle_udp_frame(struct cs2_core_t *core, unsigned char *netframe) {
-    int ret = core->io.can_enqueue(core->io.arg, netframe);
-
-    if (ret < 0)
-	fprint_syslog(stderr, LOG_ERR, "can't queue UDP frame for CAN");
-    cs2_core_handle_frame(core, CS2_SRC_UDP, -1, netframe);
-    return ret;
-}
-
-int cs2_core_handle_tcp_frame(struct cs2_core_t *core, int tcp_socket, unsigned char *netframe) {
-    if (cs2_core_handle_frame(core, CS2_SRC_TCP, tcp_socket, netframe))
-	return 1;
-    if (core->io.can_enqueue(core->io.arg, netframe) < 0)
-	fprint_syslog(stderr, LOG_ERR, "can't queue TCP frame for CAN");
-    if (core->io.udp_send(core->io.arg, netframe, CAN_ENCAP_SIZE) < 0)
-	fprint_syslog_wc(stderr, LOG_ERR, "can't broadcast TCP frame over UDP:", strerror(errno));
-    return 0;
+    cs2_core_handle_frame(core, CS2_SRC_CAN, -1, netframe);
 }
 
 /*
- * Handle a received 13-byte frame, regardless of whether it arrived via UDP,
- * TCP or the CAN bus: answer CAN member pings (in slave mode, faked as CS2),
- * serve config file requests (loks/mags/gbs/fs and the *stat files) from the
- * local config directory, feed config data streams to reassemble_data()
- * (gio.c), distribute config change broadcasts and apply the MS1 workaround.
- * Replies are routed to the UDP broadcast destination (src = CS2_SRC_UDP) or
- * back to the sending TCP client (src = CS2_SRC_TCP, tcp_socket). Returns 0
- * if the frame has to be forwarded (UDP/TCP frames: to the CAN bus, CAN
- * frames: to UDP/TCP), 1 if it was consumed locally.
+ * Logical processing of a received 13-byte frame, regardless of whether it
+ * arrived via UDP, TCP or the CAN bus: answer CAN member pings (in slave
+ * mode, faked as CS2), serve config file requests (loks/mags/gbs/fs and the
+ * *stat files) from the local config directory, feed config data streams to
+ * reassemble_data() (gio.c), distribute config change broadcasts and apply
+ * the MS1 workaround. Answers are routed to the UDP broadcast destination
+ * (src = CS2_SRC_UDP) or back to the sending TCP client (src = CS2_SRC_TCP,
+ * tcp_socket). The frame may be modified in place (response bit, MS1
+ * workaround). Forwarding the frame is the gateway's job - every frame is
+ * forwarded, regardless of what is answered here.
  */
-int cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, int tcp_socket, unsigned char *netframe) {
+void cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, int tcp_socket, unsigned char *netframe) {
     uint32_t canid;
     char config_name[9];
     char gbs_name[MAXLINE];
-    int ret;
+
     gbs_name[0] = '\0';
 
-    ret = 0;
     memcpy(&canid, netframe, 4);
     canid = ntohl(canid);
 
     /* frames from the CAN bus: a config change broadcast from a CAN member
-       triggers a config data stream to all TCP clients and is consumed;
-       every other frame is just forwarded by the gateway */
+       triggers a config data stream to all TCP clients */
     if (src == CS2_SRC_CAN) {
 	if (((canid & 0x1FFFF00UL) == 0x0434700UL) && (netframe[4] == 8)) {
 	    uint8_t fill = canid & 0xFF;
@@ -361,16 +342,15 @@ int cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, int
 	    config_name[8] = '\0';
 	    syslog(LOG_NOTICE, "%s: config request >%s<\n", __func__, config_name);
 	    core->io.tcp_config_send_all(core->io.arg, config_name, canid, CRC | COMPRESSED | BCCHANGE, fill);
-	    return 1;
+	    return;
 	}
-	/* slave mode: answer CAN member pings from the bus; the request
-	   itself is still forwarded to UDP/TCP by the gateway */
+	/* slave mode: answer CAN member pings from the bus */
 	if (core->slave && ((canid & 0xFFFF0000UL) == 0x00300000UL)) {
 	    if (core->cfg.verbose)
 		printf("                received CAN ping\n");
 	    cs2_core_answer_ping(core);
 	}
-	return 0;
+	return;
     }
 
     switch (canid & 0xFFFF0000UL) {
@@ -384,7 +364,6 @@ int cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, int
 	break;
     case (0x00310000UL):	/* CAN ping */
 	if (src == CS2_SRC_TCP) {
-	    ret = 0;
 	    /* looking for CAN member ping answer */
 	    print_can_frame(NET_TCP_FORMAT_STRG, netframe, core->cfg.verbose);
 	    if ((netframe[11] == 0xFF) && (netframe[12] == 0xFF)) {
@@ -444,11 +423,8 @@ int cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, int
 	    }
 	    break;
 	}
-	/* mark frame to send over CAN */
-	ret = 0;
 	/* check for special copy request */
 	if (canid == 0x0040af7e) {
-	    ret = 1;
 	    netframe[1] |= 1;
 	    netframe[4] = 4;
 	    strcpy((char *)&netframe[5], "copy");
@@ -466,18 +442,15 @@ int cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, int
 	    netframe[1] |= 1;
 	    core->io.tcp_send(core->io.arg, tcp_socket, netframe, CAN_ENCAP_SIZE);
 	    if (strcmp("loks", config_name) == 0) {
-		ret = 1;
 		syslog(LOG_NOTICE, "%s: sending lokomotive.cs2\n", __func__);
 		core->io.tcp_config_send(core->io.arg, "lokomotive.cs2", canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
 		break;
 	    } else if (strcmp("mags", config_name) == 0) {
-		ret = 1;
 		syslog(LOG_NOTICE, "%s: sending magnetartikel.cs2\n", __func__);
 		core->io.tcp_config_send(core->io.arg, "magnetartikel.cs2", canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
 		break;
 	    } else if (strncmp("gbs-", config_name, 4) == 0) {
 		int page_number;
-		ret = 1;
 		page_number = atoi(&config_name[4]);
 		if ((page_number >= 0) && (page_number < MAX_TRACK_PAGE) && page_name[page_number]) {
 		    syslog(LOG_NOTICE, "%s: sending %s\n", __func__, gbs_name);
@@ -487,37 +460,31 @@ int cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, int
 		syslog(LOG_NOTICE, "%s: cant't send gbs-%d\n", __func__, page_number);
 		break;
 	    } else if (strcmp("gbs", config_name) == 0) {
-		ret = 1;
 		syslog(LOG_NOTICE, "%s: sending gleisbild.cs2\n", __func__);
 		core->io.tcp_config_send(core->io.arg, "gleisbild.cs2", canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
 		break;
 	    } else if (strcmp("fs", config_name) == 0) {
-		ret = 1;
 		syslog(LOG_NOTICE, "%s: sending fahrstrassen.cs2\n", __func__);
 		core->io.tcp_config_send(core->io.arg, "fahrstrassen.cs2", canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
 		break;
 	    }
 	    /* TODO : these files depends on different internal states */
 	    else if (strcmp("lokstat", config_name) == 0) {
-		ret = 1;
 		/* fprintf(stderr, "%s: lokstat (lokomotive.sr2) not implemented yet\n", __func__); */
 		syslog(LOG_NOTICE, "%s: sending lokomotive.sr2\n", __func__);
 		core->io.tcp_config_send(core->io.arg, "lokomotive.sr2", canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
 		break;
 	    } else if (strcmp("magstat", config_name) == 0) {
-		ret = 1;
 		/* fprintf(stderr, "%s: magstat (magnetartikel.sr2) not implemented yet\n\n", __func__); */
 		syslog(LOG_NOTICE, "%s: sending magnetartikel.sr2\n", __func__);
 		core->io.tcp_config_send(core->io.arg, "magnetartikel.sr2", canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
 		break;
 	    } else if (strcmp("gbsstat", config_name) == 0) {
-		ret = 1;
 		/* fprintf(stderr, "%s: gbsstat (gleisbild.sr2) not implemented yet\n\n", __func__); */
 		syslog(LOG_NOTICE, "%s: sending gleisbild.sr2\n", __func__);
 		core->io.tcp_config_send(core->io.arg, "gleisbild.sr2", canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
 		break;
 	    } else if (strcmp("fsstat", config_name) == 0) {
-		ret = 1;
 		/* fprintf(stderr, "%s: fsstat (fahrstrassen.sr2) not implemented yet\n\n", __func__); */
 		syslog(LOG_NOTICE, "%s: sending fahrstrassen.sr2\n", __func__);
 		core->io.tcp_config_send(core->io.arg, "fahrstrassen.sr2", canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
@@ -538,26 +505,17 @@ int cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, int
 	    /* check for initiated copy request or brodcast update */
 	    reassemble_data(&core->cfg, netframe);
 	    print_can_frame(NET_TCP_FORMAT_STRG, netframe, core->cfg.verbose);
-	    /* none CAN member copy request needs to be send over CAN */
-	    if (canid & 0x0000fcff)
-		ret = 0;
-	    else
-		ret = 1;
 	}
 	break;
-	/* fake cyclic MS1 slave monitoring response */
+	/* fake cyclic MS1 slave monitoring response: the modified frame
+	   is forwarded by the gateway */
     case (0x0C000000UL):
-	if (src == CS2_SRC_TCP) {
-	    /* mark CAN frame to send */
-	    ret = 0;
-	    if (core->ms1_workaround)
-		netframe[5] = 0x03;
-	}
+	if (src == CS2_SRC_TCP && core->ms1_workaround)
+	    netframe[5] = 0x03;
 	break;
     default:
 	break;
     }
-    return ret;
 }
 
 int cs2_core_handle_ascii_frame(struct cs2_core_t *core, int tcp_socket, unsigned char *netframe, int length) {

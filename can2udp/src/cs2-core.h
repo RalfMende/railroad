@@ -10,11 +10,15 @@
 /* CS2 protocol emulation core: CAN member ping handling, config data
  * requests/streams and the config clone state machine.
  *
- * CAN and CS2 TCP/UDP handling is owned here; frame I/O is delegated to
- * the gateway (can2lan.c) through struct cs2_core_io. The legacy secondary
- * TCP ASCII protocol remains implemented unchanged in ascii-frame.c.
- * In master mode cs2_core_init() sends the 60113 start sequence and arms
- * the periodic CAN member ping, which cs2_core_tick() then services.
+ * The core contains the CS2 protocol logic: it answers requests (config
+ * data streams, CAN member pings). The gateway (can2lan.c) owns the
+ * transport: it forwards every received frame between CAN, UDP and TCP and
+ * additionally passes it to the core for logical processing. All frame I/O
+ * is delegated to the gateway through struct cs2_core_io. The legacy
+ * secondary TCP ASCII protocol remains implemented unchanged in
+ * ascii-frame.c. In master mode cs2_core_init() sends the 60113 start
+ * sequence and arms the periodic CAN member ping, which cs2_core_tick()
+ * then services.
  */
 
 #ifndef _CS2_CORE_H_
@@ -35,8 +39,6 @@ struct cs2_core_io {
     int (*can_send)(void *arg, unsigned char *frame);
     /* queue a 13-byte CAN frame for the CAN bus (non-blocking, paced by the gateway's main loop) */
     int (*can_enqueue)(void *arg, unsigned char *frame);
-    /* forward a CAN frame to UDP and TCP peers, applying gateway filters */
-    int (*can_forward)(void *arg, struct can_frame *frame);
     /* send a config file as (compressed) config data stream to TCP clients */
     int (*tcp_config_send)(void *arg, char *name, uint32_t canid, int *tcp_socket_list, int socket_nmbr, int flags,
 			   uint8_t fill);
@@ -77,13 +79,11 @@ int cs2_core_send_ping(struct cs2_core_t *core);
 /* answer a CAN member ping (slave mode): queued for the CAN bus, sent to UDP and all TCP clients */
 int cs2_core_answer_ping(struct cs2_core_t *core);
 int cs2_core_copy_config(struct cs2_core_t *core);
-/* handle a received 13-byte frame; returns 0 if it has to be forwarded, 1 if consumed locally */
-int cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, int tcp_socket, unsigned char *netframe);
-/* handle a frame received from the CAN bus and forward it to UDP/TCP unless consumed locally */
-int cs2_core_handle_can_frame(struct cs2_core_t *core, struct can_frame *frame);
-/* process UDP/TCP CAN frames, applying core decisions and transport callbacks */
-int cs2_core_handle_udp_frame(struct cs2_core_t *core, unsigned char *netframe);
-int cs2_core_handle_tcp_frame(struct cs2_core_t *core, int tcp_socket, unsigned char *netframe);
+/* logically process a received 13-byte frame: answer requests (config data, pings).
+   Forwarding the frame is the gateway's job. */
+void cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, int tcp_socket, unsigned char *netframe);
+/* logically process a frame received from the CAN bus (converted to the 13-byte network format) */
+void cs2_core_handle_can_frame(struct cs2_core_t *core, struct can_frame *frame);
 /* delegate a secondary-port ASCII command to the existing ASCII protocol handler */
 int cs2_core_handle_ascii_frame(struct cs2_core_t *core, int tcp_socket, unsigned char *netframe, int length);
 
