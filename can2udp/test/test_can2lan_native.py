@@ -5,11 +5,10 @@ Tests of the REAL can2lan C code (no Python models of the C logic).
 test_can2lan.py models the wire format in Python. This file builds the real
 sources with the system gcc and tests them:
 
-1. TestNativeTcpSendQueue / TestNativeCanQueue / TestNativeFrameToNet /
-   TestNativeConfigStream: gio.c is built as a shared library and its
-   transmit queues are driven through ctypes, with socketpair() sockets
-   standing in for TCP clients and the CAN socket. The expected bytes come
-   from the specification models in test_can2lan.py.
+1. gio.c is built as a shared library and tested through ctypes: transmit
+   queues use socketpair() sockets for TCP and CAN, config stream reception
+   uses an isolated temporary file. The expected wire bytes come from the
+   specification models in test_can2lan.py.
 
 2. TestNativeGateway: the complete can2lan binary runs against real UDP and
    TCP sockets. The PF_CAN socket is replaced via LD_PRELOAD
@@ -56,6 +55,7 @@ MAX_TCP_CONN = 64
 CAN_TX_QUEUE_LEN = 256
 CAN_TX_RETRY_US = 5000
 TCP_TX_QUEUE_MAX = 96 * 1024
+MAX_CONFIG_STREAM_SIZE = 4 * 1024 * 1024  # implementation limit in gio.c
 CRC, COMPRESSED, BCCHANGE = 0x01, 0x02, 0x04
 
 CAN_FRAME = struct.Struct("=IB3x8s")  # struct can_frame: 16 bytes
@@ -80,6 +80,20 @@ class CanFrame(ctypes.Structure):
 
 class Filter(ctypes.Structure):
     _fields_ = [("mask", ctypes.c_uint32), ("id", ctypes.c_uint32), ("use", ctypes.c_int)]
+
+
+class ConfigData(ctypes.Structure):
+    _fields_ = [
+        ("deflated_stream_size", ctypes.c_int), ("deflated_size", ctypes.c_int),
+        ("deflated_size_counter", ctypes.c_int), ("inflated_size", ctypes.c_int),
+        ("crc", ctypes.c_uint16), ("guihash", ctypes.c_uint16),
+        ("dir", ctypes.c_char_p), ("name", ctypes.c_char_p),
+        ("next", ctypes.c_int), ("verbose", ctypes.c_int), ("track_index", ctypes.c_int),
+        ("state", ctypes.c_uint), ("start", ctypes.c_int), ("stream", ctypes.c_int),
+        ("cs2_tcp_socket", ctypes.c_int), ("cs2_config_copy", ctypes.c_int),
+        ("ddi", ctypes.c_uint), ("deflated_data", ctypes.c_void_p),
+        ("inflated_data", ctypes.c_void_p), ("page_name", ctypes.c_void_p),
+    ]
 
 
 def _gcc(args):
@@ -129,6 +143,7 @@ def load_lib():
         ("can_tx_service", [c_int], ctypes.c_long),
         ("send_tcp_config_data", [c_char_p, c_char_p, ctypes.c_uint32, ctypes.POINTER(c_int),
                                   c_int, c_int, ctypes.c_uint8], c_int),
+        ("reassemble_data", [ctypes.POINTER(ConfigData), c_char_p], c_int),
     ]:
         func = getattr(LIB, name)
         func.argtypes = argtypes
@@ -604,6 +619,115 @@ class TestNativeConfigStream(LibTestCase):
             self.assertEqual(frames, expected * 3)
 
 
+class TestNativeStreamReception(LibTestCase):
+    """Exercise gio.c's real stream receiver against an isolated file."""
+
+    CONTENT = b"[lokomotive]\nname\n .name=BR 140\n"
+    ORIGINAL = b"existing configuration\n"
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="can2lan-rx-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.path = os.path.join(self.dir, "lokomotive.cs2")
+        with open(self.path, "wb") as fp:
+            fp.write(self.ORIGINAL)
+        self.cfg = ConfigData(dir=os.fsencode(self.dir + "/"), name=b"lokomotive.cs2")
+        self.addCleanup(self.free_buffers)
+
+    def free_buffers(self):
+        libc = ctypes.CDLL(None)
+        libc.free.argtypes = [ctypes.c_void_p]
+        for field in ("deflated_data", "inflated_data"):
+            libc.free(getattr(self.cfg, field))
+            setattr(self.cfg, field, None)
+
+    def feed(self, frames):
+        with quiet_stderr():
+            return [LIB.reassemble_data(ctypes.byref(self.cfg), frame) for frame in frames]
+
+    def content(self):
+        with open(self.path, "rb") as fp:
+            return fp.read()
+
+    def frames(self):
+        return model_config_stream(self.CONTENT, 0x00420300)
+
+    def test_valid_stream_writes_config(self):
+        self.feed(self.frames())
+        self.assertEqual(self.content(), self.CONTENT)
+        self.assertFalse(self.cfg.start or self.cfg.stream)
+
+    def test_empty_config_stream_writes_empty_file(self):
+        self.feed(model_config_stream(b"", 0x00420300))
+        self.assertEqual(self.content(), b"")
+        self.assertFalse(self.cfg.start or self.cfg.stream)
+
+    def test_crc_error_does_not_replace_config_and_receiver_recovers(self):
+        frames = self.frames()
+        bad = bytearray(frames[-1])
+        bad[-1] ^= 1
+        self.feed(frames[:-1] + [bytes(bad)])
+        self.assertEqual(self.content(), self.ORIGINAL)
+        self.feed(frames)
+        self.assertEqual(self.content(), self.CONTENT)
+
+    def test_invalid_dlc_aborts_and_ignores_remaining_frames(self):
+        frames = self.frames()
+        for prefix in (frames[:1], frames[:2]):
+            with self.subTest(received=len(prefix)):
+                self.feed(prefix)
+                bad = bytearray(frames[1])
+                bad[4] = 5
+                self.assertEqual(self.feed([bytes(bad)]), [0])
+                self.assertFalse(self.cfg.start or self.cfg.stream)
+                self.feed(frames[len(prefix):])
+                self.assertEqual(self.content(), self.ORIGINAL)
+        self.feed(frames)
+        self.assertEqual(self.content(), self.CONTENT)
+
+    def test_incomplete_stream_does_not_write_and_new_stream_replaces_it(self):
+        frames = self.frames()
+        self.feed(frames[:-1])
+        self.assertTrue(self.cfg.start or self.cfg.stream)
+        self.assertEqual(self.content(), self.ORIGINAL)
+        self.feed(frames)
+        self.assertEqual(self.content(), self.CONTENT)
+
+    def test_stream_size_limit_and_oversized_values(self):
+        header = bytearray(self.frames()[0])
+        header[5:9] = MAX_CONFIG_STREAM_SIZE.to_bytes(4, "big")
+        self.assertEqual(self.feed([bytes(header)]), [1])
+        self.assertTrue(self.cfg.start)
+        bad = bytearray(self.frames()[1])
+        bad[4] = 5
+        self.feed([bytes(bad)])
+
+        for size in (MAX_CONFIG_STREAM_SIZE + 1, 0x80000000, 0xFFFFFFFF):
+            with self.subTest(deflated_size=size):
+                header[5:9] = size.to_bytes(4, "big")
+                self.assertEqual(self.feed([bytes(header)]), [0])
+                self.assertFalse(self.cfg.start or self.cfg.stream)
+        header = self.frames()[0]
+        data = bytearray(self.frames()[1])
+        data[5:9] = MAX_CONFIG_STREAM_SIZE.to_bytes(4, "big")
+        self.feed([header, bytes(data)])
+        self.assertTrue(self.cfg.stream)
+        bad = bytearray(data)
+        bad[4] = 5
+        self.feed([bytes(bad)])
+        for size in (MAX_CONFIG_STREAM_SIZE + 1, 0x80000000, 0xFFFFFFFF):
+            with self.subTest(inflated_size=size):
+                header = self.frames()[0]
+                data = bytearray(self.frames()[1])
+                data[5:9] = size.to_bytes(4, "big")
+                self.feed([header])
+                self.assertEqual(self.feed([bytes(data)]), [0])
+                self.assertFalse(self.cfg.start or self.cfg.stream)
+        self.assertEqual(self.content(), self.ORIGINAL)
+        self.feed(self.frames())
+        self.assertEqual(self.content(), self.CONTENT)
+
+
 # ------------------------------------------------ the complete gateway
 
 class Gateway:
@@ -756,11 +880,35 @@ class TestNativeGateway(unittest.TestCase):
         self.assertLess(elapsed, 3.0)
 
     def test_malformed_udp_packets_are_ignored(self):
+        client = self.gw.connect()
+        self.gw.udp_send(b"")
         self.gw.udp_send(bytes(12))
         self.gw.udp_send(bytes(14))
         self.assertIsNone(self.gw.bus_recv(0.3))
+        self.assertIsNone(self.gw.udp_recv(0.2))
+        client.settimeout(0.2)
+        with self.assertRaises(socket.timeout):
+            client.recv(1)
         self.gw.udp_send(seq_frame(1))
         self.assertIsNotNone(self.gw.bus_recv())
+
+    def test_network_frame_boundaries_to_can(self):
+        client = self.gw.connect()
+        for canid, data in ((0, b""), (0x1FFFFFFF, bytes(range(8))),
+                            (0xFFFFFFFF, bytes(range(8)))):
+            packet = canid.to_bytes(4, "big") + bytes([len(data)]) + data.ljust(8, b"\0")
+            for source in ("udp", "tcp"):
+                with self.subTest(canid=canid, source=source):
+                    if source == "udp":
+                        self.gw.udp_send(packet)
+                    else:
+                        client.sendall(packet)
+                    self.assertEqual(self.gw.bus_recv(), ((canid & 0x1FFFFFFF) | CAN_EFF_FLAG, len(data),
+                                                          data.ljust(8, b"\0")))
+        self.assertIsNone(self.gw.udp_recv(0.2))
+        client.settimeout(0.2)
+        with self.assertRaises(socket.timeout):
+            client.recv(1)
 
     def test_s88_event_uses_the_regular_udp_to_can_path(self):
         client = self.gw.connect()
@@ -804,6 +952,17 @@ class TestNativeGateway(unittest.TestCase):
         self.assertEqual(self.gw.bus_recv(), frame_to_can(frame))
         self.assertIsNone(self.gw.bus_recv(0.3), "exactly one frame")
 
+    def test_incomplete_tcp_frame_is_discarded_on_disconnect(self):
+        client = self.gw.connect()
+        client.sendall(seq_frame(8)[:12])
+        client.close()
+        self.assertIsNone(self.gw.bus_recv(0.3))
+        replacement = self.gw.connect()
+        replacement.sendall(seq_frame(9))
+        self.assertEqual(self.gw.bus_recv(), frame_to_can(seq_frame(9)))
+        self.assertIsNone(self.gw.bus_recv(0.2))
+        self.assertIsNone(self.gw.udp_recv(0.2))
+
     def test_combined_tcp_frames_all_arrive_in_order(self):
         client = self.gw.connect()
         client.sendall(b"".join(seq_frame(i) for i in range(10)))
@@ -835,6 +994,15 @@ class TestNativeGateway(unittest.TestCase):
         for client in clients:
             self.assertEqual(recv_exact(client, 13), expected)
 
+    def test_can_frame_boundaries_reach_udp_and_tcp(self):
+        client = self.gw.connect()
+        for canid, data in ((0, b""), (0x1FFFFFFF, bytes(range(8)))):
+            with self.subTest(canid=canid):
+                self.gw.bus_send(canid, data)
+                expected = canid.to_bytes(4, "big") + bytes([len(data)]) + data.ljust(8, b"\0")
+                self.assertEqual(self.gw.udp_recv(), expected)
+                self.assertEqual(recv_exact(client, 13), expected)
+
     def test_can_burst_reaches_every_client_in_order(self):
         clients = [self.gw.connect(), self.gw.connect()]
         count = 2000
@@ -847,8 +1015,47 @@ class TestNativeGateway(unittest.TestCase):
     def test_non_extended_can_frames_are_ignored(self):
         client = self.gw.connect()
         self.gw.bus.send(CAN_FRAME.pack(0x123, 1, bytes(8)))      # standard frame
+        self.assertIsNone(self.gw.udp_recv(0.2))
+        client.settimeout(0.2)
+        with self.assertRaises(socket.timeout):
+            client.recv(1)
         self.gw.bus_send(0x00080300, struct.pack(">H", 1))
         self.assertEqual(seq_of(recv_exact(client, 13)), 1)
+        self.assertEqual(self.gw.udp_recv(), seq_frame(1))
+
+    def test_config_stream_frames_forwarded_in_all_gateway_directions(self):
+        client = self.gw.connect()
+        frames = model_config_stream(b"[lokomotive]\n .name=Test\n", 0x00421234)
+        for frame in frames:
+            canid = int.from_bytes(frame[:4], "big")
+            self.gw.bus_send(canid, frame[5:13], dlc=frame[4])
+        self.assertEqual([self.gw.udp_recv() for _ in frames], frames)
+        self.assertEqual(split_frames(recv_exact(client, len(frames) * 13)), frames)
+
+        for frame in frames:
+            self.gw.udp_send(frame)
+        self.assertEqual([self.gw.bus_recv() for _ in frames], [frame_to_can(f) for f in frames])
+        client.sendall(b"".join(frames))
+        self.assertEqual([self.gw.bus_recv() for _ in frames], [frame_to_can(f) for f in frames])
+        self.assertIsNone(self.gw.udp_recv(0.2))
+        client.settimeout(0.2)
+        with self.assertRaises(socket.timeout):
+            client.recv(1)
+
+    def test_malformed_stream_frame_is_forwarded_without_cross_network_bridge(self):
+        client = self.gw.connect()
+        bad = bytes([0x00, 0x42, 0x12, 0x34, 0x05]) + b"bad!!\0\0\0"
+        self.gw.udp_send(bad)
+        self.assertEqual(self.gw.bus_recv(), frame_to_can(bad))
+        client.sendall(bad)
+        self.assertEqual(self.gw.bus_recv(), frame_to_can(bad))
+        self.gw.bus_send(0x00421234, bad[5:13], dlc=5)
+        self.assertEqual(self.gw.udp_recv(), bad)
+        self.assertEqual(recv_exact(client, 13), bad)
+        self.assertIsNone(self.gw.udp_recv(0.2))
+        client.settimeout(0.2)
+        with self.assertRaises(socket.timeout):
+            client.recv(1)
 
     # ---- slow and broken clients
     def test_stuck_client_does_not_stall_the_gateway(self):

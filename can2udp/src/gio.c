@@ -686,22 +686,26 @@ int reassemble_data(struct cs2_config_data_t *config_data, unsigned char *netfra
     if ((memcmp(netframe, GETCONFIG_RESPONSE, 5) == 0) ||
 	(memcmp(netframe, GETCONFIG_RESPONSE_II, 5) == 0)) {
 	memcpy(&temp, &netframe[5], 4);
-	config_data->deflated_size = ntohl(temp);
+	temp = ntohl(temp);
+	if (temp > MAX_CONFIG_STREAM_SIZE) {
+	    syslog(LOG_ERR, "%s: abort config data stream - announced deflated size 0x%08x exceeds limit\n",
+		   __func__, temp);
+	    config_data->start = 0;
+	    config_data->stream = 0;
+	    config_data->state = CS2_STATE_INACTIVE;
+	    free(config_data->deflated_data);
+	    config_data->deflated_data = NULL;
+	    free(config_data->inflated_data);
+	    config_data->inflated_data = NULL;
+	    return 0;
+	}
+	config_data->deflated_size = temp;
 	config_data->deflated_size_counter = config_data->deflated_size;
 
 	memcpy(&temp, &netframe[9], 2);
 	config_data->crc = ntohs(temp);
 	if (config_data->verbose)
 	    printf("\nstart of config - deflated size: 0x%08x crc 0x%04x\n", config_data->deflated_size, config_data->crc);
-
-	if (config_data->deflated_size > MAX_CONFIG_STREAM_SIZE) {
-	    syslog(LOG_ERR, "%s: abort config data stream - announced deflated size 0x%08x exceeds limit\n",
-		   __func__, config_data->deflated_size);
-	    config_data->start = 0;
-	    config_data->stream = 0;
-	    config_data->state = CS2_STATE_INACTIVE;
-	    return 0;
-	}
 
 	config_data->start = 1;
 	/* we alloc 8 bytes more to be sure that it fits */
@@ -716,17 +720,20 @@ int reassemble_data(struct cs2_config_data_t *config_data, unsigned char *netfra
     } else if (memcmp(netframe, GETCONFIG_DATA, 5) == 0) {
 	if (config_data->start) {
 	    memcpy(&temp, &netframe[5], 4);
-	    config_data->inflated_size = ntohl(temp);
-	    if (config_data->inflated_size > MAX_CONFIG_STREAM_SIZE) {
+	    temp = ntohl(temp);
+	    if (temp > MAX_CONFIG_STREAM_SIZE) {
 		syslog(LOG_ERR, "%s: abort config data stream - announced inflated size 0x%08x exceeds limit\n",
-		       __func__, config_data->inflated_size);
+		       __func__, temp);
 		config_data->start = 0;
 		config_data->stream = 0;
 		config_data->state = CS2_STATE_INACTIVE;
 		free(config_data->deflated_data);
 		config_data->deflated_data = NULL;
+		free(config_data->inflated_data);
+		config_data->inflated_data = NULL;
 		return 0;
 	    }
+	    config_data->inflated_size = temp;
 	    config_data->inflated_data = realloc(config_data->inflated_data, config_data->inflated_size);
 	    if (config_data->inflated_data == NULL) {
 		fprintf(stderr, "can't malloc inflated config data buffer - size 0x%04x\n", config_data->inflated_size);
