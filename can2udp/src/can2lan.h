@@ -133,6 +133,7 @@ struct cs2_config_data_t {
     uint8_t *deflated_data;
     uint8_t *inflated_data;
     char **page_name;
+    uint16_t stream_hash;
 };
 
 #define MS1_BUFFER_SIZE 8

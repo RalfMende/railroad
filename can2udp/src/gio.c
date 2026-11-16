@@ -26,8 +26,6 @@
 #define MAX_CONFIG_STREAM_SIZE	(4 * 1024 * 1024)
 
 unsigned char GETCONFIG_RESPONSE[]    = { 0x00, 0x42, 0x03, 0x00, 0x06 };
-unsigned char GETCONFIG_RESPONSE_II[] = { 0x00, 0x42, 0x03, 0x00, 0x07 };
-
 extern unsigned char GETCONFIG_DATA[];
 extern unsigned char GETCONFIG[];
 extern char *cs2_configs[][2];
@@ -679,12 +677,21 @@ int config_write(struct cs2_config_data_t *config_data) {
 
 int reassemble_data(struct cs2_config_data_t *config_data, unsigned char *netframe) {
     unsigned int state, temp;
+    uint16_t hash;
     unsigned char newframe[CAN_ENCAP_SIZE];
     char *filename;
     char *ptr;
 
-    if ((memcmp(netframe, GETCONFIG_RESPONSE, 5) == 0) ||
-	(memcmp(netframe, GETCONFIG_RESPONSE_II, 5) == 0)) {
+    if (memcmp(netframe, GETCONFIG_DATA, 2) != 0)
+	return 1;
+    memcpy(&hash, &netframe[2], sizeof(hash));
+    hash = ntohs(hash);
+    if ((config_data->start || config_data->stream) && hash != config_data->stream_hash) {
+	syslog(LOG_DEBUG, "%s: ignoring config stream frame with another hash 0x%04x\n", __func__, hash);
+	return 1;
+    }
+
+    if ((memcmp(netframe, GETCONFIG_RESPONSE, 5) == 0) || netframe[4] == 7) {
 	memcpy(&temp, &netframe[5], 4);
 	temp = ntohl(temp);
 	if (temp > MAX_CONFIG_STREAM_SIZE) {
@@ -708,6 +715,8 @@ int reassemble_data(struct cs2_config_data_t *config_data, unsigned char *netfra
 	    printf("\nstart of config - deflated size: 0x%08x crc 0x%04x\n", config_data->deflated_size, config_data->crc);
 
 	config_data->start = 1;
+	config_data->stream = 0;
+	config_data->stream_hash = hash;
 	/* we alloc 8 bytes more to be sure that it fits */
 	config_data->deflated_data = realloc(config_data->deflated_data, config_data->deflated_size + 16);
 	if (config_data->deflated_data == NULL) {
@@ -717,7 +726,7 @@ int reassemble_data(struct cs2_config_data_t *config_data, unsigned char *netfra
 	/* deflated data index */
 	config_data->ddi = 0;
 
-    } else if (memcmp(netframe, GETCONFIG_DATA, 5) == 0) {
+    } else if (netframe[4] == 8) {
 	if (config_data->start) {
 	    memcpy(&temp, &netframe[5], 4);
 	    temp = ntohl(temp);

@@ -46,11 +46,6 @@ BC_CHANGE_ID = 0x0434700
 STREAM_CLEAR_RESP = 0xFFFEFFFF
 STREAM_SET_CMD = 0x00020000
 
-# from src/cs2-core.c cs2_core_handle_frame(): config stream frames whose
-# hash bits (canid & 0xFCFF) are all zero belong to a CAN member copy request
-# and are NOT forwarded to CAN; all other hashes are forwarded
-COPY_REQUEST_HASH_MASK = 0x0000FCFF
-
 # from src/cs2-core.c cs2_core_handle_frame(): config names answered by can2lan itself
 LOCAL_CONFIG_NAMES = {b"loks", b"mags", b"gbs", b"fs",
                       b"lokstat", b"magstat", b"gbsstat", b"fsstat"}
@@ -186,9 +181,9 @@ def check_data(frame):
       bit already set (netframe[1] |= 1 happens before the name lookup) -
       a device on the bus sees a supposed response instead of a request
       (suspicious, not backed by the specification).
-    - 0x42 config data stream: handled locally only if
-      (canid & 0xFCFF) == 0, i.e. for the copy-request hash 0x0300;
-      every frame is forwarded to CAN regardless.
+    - 0x42 config data stream: a broadcast start (DLC 7) accepts the sender
+      hash; the copy response uses 0x0300. This stateless model cannot
+      determine whether a data frame belongs to an active broadcast.
     - everything else (including 0x30/0x31 pings): forwarded unchanged.
     """
     out = bytearray(frame)
@@ -205,7 +200,7 @@ def check_data(frame):
             return True, bytes(out)
         return False, bytes(out)
     if cmd == 0x00420000:
-        return (canid & COPY_REQUEST_HASH_MASK) == 0, bytes(out)
+        return frame[4] == 7 or (canid & 0xFFFF) == 0x0300, bytes(out)
     return False, bytes(out)
 
 
@@ -226,13 +221,17 @@ class ReassembleData:
         self.deflated_size = 0
         self.crc = 0
         self.buf = bytearray()
+        self.stream_hash = None
 
     def feed(self, packet):
         can_id = int.from_bytes(packet[0:4], "big")
         dlc = packet[4]
         if (can_id & 0xFFFF0000) != 0x00420000:
             return None
-        if dlc in (6, 7):
+        hash_value = can_id & 0xFFFF
+        if self.active and hash_value != self.stream_hash:
+            return None
+        if (dlc == 6 and hash_value == 0x0300) or dlc == 7:
             # stream start: announced deflated size and CRC
             self.deflated_size = int.from_bytes(packet[5:9], "big")
             self.crc = int.from_bytes(packet[9:11], "big")
@@ -240,6 +239,7 @@ class ReassembleData:
                 self._abort()
                 raise self.StreamAborted("announced deflated size exceeds limit")
             self.active = True
+            self.stream_hash = hash_value
             self.buf = bytearray()
             return None
         if dlc == 8 and self.active:
@@ -590,15 +590,14 @@ class TestTcpToCan(unittest.TestCase):
         self.assertEqual(out[1] & 1, 1)
 
     def test_config_stream_copy_hash_handled_and_forwarded(self):
-        # hash 0x0300 (GETCONFIG_RESPONSE): canid & 0xfcff == 0 -> fed to
-        # reassemble_data(), forwarded unchanged like every frame
+        # hash 0x0300 (GETCONFIG_RESPONSE) is forwarded and received
         packet = bytes([0x00, 0x42, 0x03, 0x00, 0x06]) + bytes(8)
         answered, out = check_data(packet)
         self.assertTrue(answered)
         self.assertEqual(out, packet)
 
     def test_config_stream_other_hash_forwarded_to_can(self):
-        # any other hash: canid & 0xfcff != 0 -> not handled locally
+        # a response start with another hash is not handled locally
         for hash_bytes in ((0x03, 0x01), (0x12, 0x34), (0x00, 0x01)):
             packet = bytes([0x00, 0x42]) + bytes(hash_bytes) + bytes([6]) + bytes(8)
             answered, out = check_data(packet)

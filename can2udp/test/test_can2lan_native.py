@@ -93,6 +93,7 @@ class ConfigData(ctypes.Structure):
         ("cs2_tcp_socket", ctypes.c_int), ("cs2_config_copy", ctypes.c_int),
         ("ddi", ctypes.c_uint), ("deflated_data", ctypes.c_void_p),
         ("inflated_data", ctypes.c_void_p), ("page_name", ctypes.c_void_p),
+        ("stream_hash", ctypes.c_uint16),
     ]
 
 
@@ -657,6 +658,33 @@ class TestNativeStreamReception(LibTestCase):
         self.assertEqual(self.content(), self.CONTENT)
         self.assertFalse(self.cfg.start or self.cfg.stream)
 
+    def test_broadcast_uses_sender_hash_for_every_frame(self):
+        for canid in (0x00424711, 0x0042634A):
+            with self.subTest(canid=canid):
+                frames = model_config_stream(self.CONTENT, canid, broadcast=True)
+                self.feed(frames)
+                self.assertEqual(self.content(), self.CONTENT)
+                self.assertFalse(self.cfg.start or self.cfg.stream)
+                with open(self.path, "wb") as fp:
+                    fp.write(self.ORIGINAL)
+
+    def test_other_sender_frames_do_not_interrupt_active_broadcast(self):
+        frames = model_config_stream(self.CONTENT, 0x00424711, broadcast=True)
+        other = model_config_stream(b"other sender", 0x0042634A, broadcast=True)
+        bad = bytearray(other[1])
+        bad[4] = 5
+        self.feed([frames[0], other[0], other[1], bytes(bad)])
+        self.assertTrue(self.cfg.start)
+        self.assertEqual(self.content(), self.ORIGINAL)
+        self.feed(frames[1:])
+        self.assertEqual(self.content(), self.CONTENT)
+
+    def test_non_matching_response_hash_is_not_accepted(self):
+        frames = model_config_stream(self.CONTENT, 0x00424711)
+        self.feed(frames)
+        self.assertFalse(self.cfg.start or self.cfg.stream)
+        self.assertEqual(self.content(), self.ORIGINAL)
+
     def test_empty_config_stream_writes_empty_file(self):
         self.feed(model_config_stream(b"", 0x00420300))
         self.assertEqual(self.content(), b"")
@@ -733,7 +761,7 @@ class TestNativeStreamReception(LibTestCase):
 class Gateway:
     """The real can2lan binary, with the test acting as CAN bus, UDP peer and TCP client."""
 
-    def __init__(self, test, args=(), sndbuf=4096):
+    def __init__(self, test, args=(), sndbuf=4096, config_dir=CONFIG_DIR):
         self.test = test
         self.ports = {}
         for name, kind in (("udp_in", socket.SOCK_DGRAM), ("udp_out", socket.SOCK_DGRAM),
@@ -752,7 +780,7 @@ class Gateway:
         env = dict(os.environ, LD_PRELOAD=os.path.join(BUILD, "can_shim.so"), CAN_SHIM_FD=str(child.fileno()),
                    CAN_SHIM_SNDBUF=str(sndbuf))
         self.proc = subprocess.Popen(
-            [os.path.join(BUILD, "can2lan"), "-f", "-c", CONFIG_DIR, "-u", str(self.ports["udp_in"]),
+            [os.path.join(BUILD, "can2lan"), "-f", "-c", config_dir, "-u", str(self.ports["udp_in"]),
              "-t", str(self.ports["tcp"]), "-s", str(self.ports["tcp2"]), "-d", str(self.ports["udp_out"]),
              "-b", "127.0.0.1", "-i", "vcan0"] + list(args),
             env=env, pass_fds=(child.fileno(),), stdout=self.log, stderr=self.log)
@@ -1225,6 +1253,26 @@ class TestNativeGateway(unittest.TestCase):
         self.gw.connect()
         self.gw.proc.send_signal(signal.SIGTERM)
         self.assertEqual(self.gw.proc.wait(5), 0)
+
+
+class TestNativeBroadcastGateway(unittest.TestCase):
+    def test_tcp_broadcast_with_sender_hash_is_reassembled(self):
+        config_dir = tempfile.mkdtemp(prefix="can2lan-broadcast-")
+        self.addCleanup(shutil.rmtree, config_dir, True)
+        shutil.copytree(CONFIG_DIR, config_dir, dirs_exist_ok=True)
+        gw = Gateway(self, config_dir=config_dir)
+        self.assertIsNotNone(gw.bus_recv())
+        client = gw.connect()
+        for canid, content in ((0x00424711, b"[first]\n .name=one\n"),
+                               (0x0042634A, b"[second]\n .name=two\n")):
+            with self.subTest(canid=canid):
+                frames = model_config_stream(content, canid, broadcast=True)
+                client.sendall(b"".join(frames))
+                self.assertEqual([gw.bus_recv() for _ in frames], [frame_to_can(f) for f in frames])
+                path = os.path.join(config_dir, "broadcast_update.cs2")
+                with open(path, "rb") as fp:
+                    self.assertEqual(fp.read(), content)
+        self.assertIsNone(gw.udp_recv(0.2))
 
 
 class TestNativeGatewaySlave(unittest.TestCase):

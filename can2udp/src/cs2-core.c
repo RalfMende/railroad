@@ -527,9 +527,15 @@ void cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, in
     case (0x00420000UL):
 	if (src == CS2_SRC_TCP) {
 	    /* check for bordcast config change: DLC = 7 */
-	    if (netframe[4] == 7) {
+	    if (netframe[4] == 7 &&
+		(!(core->cfg.start || core->cfg.stream) ||
+		 core->cfg.stream_hash == (canid & 0xFFFF))) {
 		/* TODO */
 		syslog(LOG_NOTICE, "%s: broadcast config change", __func__);
+		if (!core->cfg.dir) {
+		    syslog(LOG_WARNING, "%s: config directory is not initialized\n", __func__);
+		    break;
+		}
 		core->cfg.name = BROADCAST_C0NFIG_UPDATE;
 		core->cfg.state = CS2_STATE_BROADCAST_UPDATE;
 	    }
