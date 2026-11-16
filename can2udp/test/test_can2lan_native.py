@@ -59,8 +59,9 @@ MAX_CONFIG_STREAM_SIZE = 4 * 1024 * 1024  # implementation limit in cs2-core.c
 CRC, COMPRESSED, BCCHANGE = 0x01, 0x02, 0x04
 
 CAN_FRAME = struct.Struct("=IB3x8s")  # struct can_frame: 16 bytes
-# command 0x18 "Softwarestand Anfrage / Teilnehmer Ping", DLC 0 (M_CAN_MEMBER_PING in src/cs2-core.c)
-M_CAN_MEMBER_PING = bytes([0x00, 0x30, 0x47, 0x11]) + bytes(9)
+M_GLEISBOX_ALL_PROTO_ENABLE = bytes.fromhex("00000301060000000008070000")
+# command 0x18 "Softwarestand Anfrage / Teilnehmer Ping", DLC 0
+M_SOFTWARE_VERSION_REQUEST_MEMBER_PING = bytes([0x00, 0x30, 0x47, 0x11]) + bytes(9)
 # ping answer of the slave mode (M_CAN_PING_CS2_3 in src/cs2-core.c):
 # response bit set, DLC 8, SW version 0x0402, device id 0xFFFF (CS2-GUI)
 M_CAN_PING_ANSWER = bytes([0x00, 0x31, 0x03, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x04, 0x02, 0xFF, 0xFF])
@@ -147,6 +148,7 @@ def load_lib():
         ("test_config_send_stream", [c_char_p, c_char_p, ctypes.c_uint32, ctypes.POINTER(c_int),
                                      c_int, c_int, ctypes.c_uint8], c_int),
         ("test_config_reassemble", [ctypes.POINTER(ConfigData), c_char_p], c_int),
+        ("test_core_send_start_frames", [c_int, c_int, c_int], c_int),
     ]:
         func = getattr(LIB, name)
         func.argtypes = argtypes
@@ -157,6 +159,27 @@ class LibTestCase(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         load_lib()
+
+
+class TestNativeCoreStart(LibTestCase):
+    def test_start_frame_sent_to_all_transports(self):
+        pairs = [socket.socketpair() for _ in range(3)]
+        for pair in pairs:
+            for sock in pair:
+                self.addCleanup(sock.close)
+        self.assertEqual(LIB.test_core_send_start_frames(*[pair[0].fileno() for pair in pairs]), 0)
+        for _, peer in pairs:
+            self.assertEqual(recv_exact(peer, 13), M_GLEISBOX_ALL_PROTO_ENABLE)
+
+    def test_start_frame_reports_udp_failure_and_still_sends_tcp(self):
+        can, can_peer = socket.socketpair()
+        tcp, tcp_peer = socket.socketpair()
+        for sock in (can, can_peer, tcp, tcp_peer):
+            self.addCleanup(sock.close)
+        with quiet_stderr():
+            self.assertEqual(LIB.test_core_send_start_frames(can.fileno(), -1, tcp.fileno()), -1)
+        self.assertEqual(recv_exact(can_peer, 13), M_GLEISBOX_ALL_PROTO_ENABLE)
+        self.assertEqual(recv_exact(tcp_peer, 13), M_GLEISBOX_ALL_PROTO_ENABLE)
 
 
 def tearDownModule():
@@ -891,6 +914,8 @@ class Gateway:
         child.close()
         test.addCleanup(self.stop)
         self._wait_until_listening()
+        if "-S" not in args:
+            test.assertEqual(self.udp_recv(), M_GLEISBOX_ALL_PROTO_ENABLE)
 
     def _wait_until_listening(self):
         deadline = time.monotonic() + 5
@@ -1384,14 +1409,43 @@ class TestNativeGateway(unittest.TestCase):
         self.assertTrue(self.gw.alive())
 
     # ---- master mode (default): periodic CAN member ping
-    def test_master_sends_periodic_can_ping(self):
+    def test_master_forwards_ping_requests_without_answering(self):
         client = self.gw.connect()
+        request = bytes.fromhex("0030471100") + bytes(8)
+        self.gw.bus_send(0x00304711, b"")
+        self.assertEqual(self.gw.udp_recv(), request)
+        self.assertEqual(recv_exact(client, 13), request)
+        self.assertIsNone(self.gw.bus_recv(0.2))
+
+        self.gw.udp_send(request)
+        self.assertEqual(self.gw.bus_recv(), frame_to_can(request))
+        self.assertIsNone(self.gw.udp_recv(0.2))
+
+        client.sendall(request)
+        self.assertEqual(self.gw.bus_recv(), frame_to_can(request))
+        self.assertIsNone(self.gw.udp_recv(0.2))
+        client.settimeout(0.2)
+        with self.assertRaises(socket.timeout):
+            client.recv(1)
+
+    def test_master_does_not_reply_to_udp_ping_answer(self):
+        answer = bytes.fromhex("0031634a08010203040402eeee")
+        self.gw.udp_send(answer)
+        self.assertEqual(self.gw.bus_recv(), frame_to_can(answer))
+        self.assertIsNone(self.gw.udp_recv(0.2))
+
+    def test_master_sends_periodic_can_ping(self):
+        clients = [self.gw.connect(), self.gw.connect()]
         bootloader = self.gw.bus_recv(PING_TIME + 2.0)
         self.assertIsNotNone(bootloader, "no periodic CAN member ping within %d s" % (PING_TIME + 2))
         self.assertEqual(bootloader, frame_to_can(M_BOOTLOADER_CAN_BOUND))
-        self.assertEqual(self.gw.bus_recv(), frame_to_can(M_CAN_MEMBER_PING))
-        # TCP clients get the ping as well
-        self.assertEqual(recv_exact(client, 13), M_CAN_MEMBER_PING)
+        self.assertEqual(self.gw.bus_recv(), frame_to_can(M_SOFTWARE_VERSION_REQUEST_MEMBER_PING))
+        self.assertEqual(self.gw.udp_recv(), M_BOOTLOADER_CAN_BOUND)
+        self.assertEqual(self.gw.udp_recv(), M_SOFTWARE_VERSION_REQUEST_MEMBER_PING)
+        for client in clients:
+            self.assertEqual(split_frames(recv_exact(client, 26)),
+                             [M_BOOTLOADER_CAN_BOUND, M_SOFTWARE_VERSION_REQUEST_MEMBER_PING])
+        self.assertIsNone(self.gw.udp_recv(0.2))
 
     def test_master_ping_timer_runs_during_continuous_udp_activity(self):
         client = self.gw.connect()
@@ -1404,8 +1458,11 @@ class TestNativeGateway(unittest.TestCase):
             if frame is not None:
                 self.assertEqual(frame, frame_to_can(M_BOOTLOADER_CAN_BOUND))
                 ping_times.append(time.monotonic())
-                self.assertEqual(self.gw.bus_recv(), frame_to_can(M_CAN_MEMBER_PING))
-                self.assertEqual(recv_exact(client, 13), M_CAN_MEMBER_PING)
+                self.assertEqual(self.gw.bus_recv(), frame_to_can(M_SOFTWARE_VERSION_REQUEST_MEMBER_PING))
+                self.assertEqual(self.gw.udp_recv(), M_BOOTLOADER_CAN_BOUND)
+                self.assertEqual(self.gw.udp_recv(), M_SOFTWARE_VERSION_REQUEST_MEMBER_PING)
+                self.assertEqual(split_frames(recv_exact(client, 26)),
+                                 [M_BOOTLOADER_CAN_BOUND, M_SOFTWARE_VERSION_REQUEST_MEMBER_PING])
         self.assertEqual(len(ping_times), 2, "periodic pings stopped during UDP activity")
         self.assertGreater(ping_times[0] - start, PING_TIME - 2)
         self.assertLess(ping_times[0] - start, PING_TIME + 2)
@@ -1508,6 +1565,15 @@ class TestNativeGatewaySlave(unittest.TestCase):
     def test_slave_sends_no_periodic_ping(self):
         self.assertIsNone(self.gw.bus_recv(PING_TIME + 1.0),
                           "slave must not send the periodic CAN member ping")
+        self.assertIsNone(self.gw.udp_recv(0.2), "slave must not broadcast the bootloader frame")
+
+    def test_slave_udp_ping_answer_is_forwarded_unchanged(self):
+        answer = bytes.fromhex("0031634a08010203040402eeee")
+        self.gw.udp_send(answer)
+        self.assertEqual(self.gw.bus_recv(), frame_to_can(answer))
+        self.assertEqual(self.gw.udp_recv(), bytes.fromhex("0030000000") + answer[5:])
+        self.assertEqual(self.gw.udp_recv(), bytes.fromhex("0031634a08000000000402fff0"))
+        self.assertEqual(self.gw.udp_recv(), bytes.fromhex("0031634b080000000003440000"))
 
     def test_slave_does_not_answer_udp_config_requests(self):
         request = bytes([0x00, 0x40, 0x12, 0x34, 0x08]) + b"loks\0\0\0\0"

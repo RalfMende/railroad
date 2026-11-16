@@ -38,7 +38,7 @@ static unsigned char M_GLEISBOX_ALL_PROTO_ENABLE[] =
     { 0x00, 0x00, 0x03, 0x01, 0x06, 0x00, 0x00, 0x00, 0x00, 0x08, 0x07, 0x00, 0x00 };
 /* command 0x18 "Softwarestand Anfrage / Teilnehmer Ping", DLC 0: query all
    CAN bus members (also sent to TCP clients with the periodic master ping) */
-unsigned char M_CAN_MEMBER_PING[] =
+unsigned char M_SOFTWARE_VERSION_REQUEST_MEMBER_PING[] =
     { 0x00, 0x30, 0x47, 0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
 /* fake CS2 ping answers of further bus members, sent in slave mode */
 static unsigned char M_CAN_PING_CS2_1[] =
@@ -670,7 +670,7 @@ static int cs2_config_send_stream(char *filename, char *config_dir, uint32_t can
  * gateway I/O callbacks. The context must be zero-initialized by the
  * caller; options parsed before this call (slave mode, verbose, ...) are
  * preserved. The config clone state machine starts inactive.
- * Master mode: the 60113 start sequence is sent to the CAN bus first and
+ * Master mode: the 60113 start frame is sent to CAN, UDP and TCP first and
  * the periodic CAN member ping timer (PING_TIME seconds) is armed. Slave
  * mode: neither happens - the core only answers pings. Returns -1 if paths
  * are too long, start frames could not be sent, or the timer could not start.
@@ -777,12 +777,14 @@ void cs2_core_close(struct cs2_core_t *core) {
 }
 
 /*
- * Send the Gleisbox (60113) start frame to the CAN bus: enable all loco
- * protocols. Blocking (paced) - called before the gateway main loop runs.
+ * Queue the Gleisbox (60113) start frame for CAN and send it to UDP and
+ * connected TCP clients. Called before the gateway main loop runs.
  * Returns -1 if the frame could not be sent.
  */
 int cs2_core_send_start_frames(struct cs2_core_t *core) {
-    if (core->io.can_send(core->io.arg, M_GLEISBOX_ALL_PROTO_ENABLE) < 0) {
+    int ret = 0;
+
+    if (core->io.can_enqueue(core->io.arg, M_GLEISBOX_ALL_PROTO_ENABLE) < 0) {
 	fprint_syslog(stderr, LOG_ERR, "can't enable all loco protos");
 	return -1;
     } else {
@@ -791,16 +793,26 @@ int cs2_core_send_start_frames(struct cs2_core_t *core) {
 	    print_can_frame(CAN_FORMAT_STRG, M_GLEISBOX_ALL_PROTO_ENABLE, core->cfg.verbose);
 	}
     }
-
-    return 0;
+    if (core->io.udp_send(core->io.arg, M_GLEISBOX_ALL_PROTO_ENABLE, CAN_ENCAP_SIZE) < 0) {
+	fprint_syslog(stderr, LOG_ERR, "can't send UDP start frame");
+	ret = -1;
+    } else {
+	print_can_frame(NET_UDP_FORMAT_STRG, M_GLEISBOX_ALL_PROTO_ENABLE, core->cfg.verbose);
+    }
+    if (core->io.tcp_send_all(core->io.arg, M_GLEISBOX_ALL_PROTO_ENABLE, CAN_ENCAP_SIZE) < 0) {
+	fprint_syslog(stderr, LOG_ERR, "can't send TCP start frame");
+	ret = -1;
+    } else {
+	print_can_frame(NET_TCP_FORMAT_STRG, M_GLEISBOX_ALL_PROTO_ENABLE, core->cfg.verbose);
+    }
+    return ret;
 }
 
 /*
  * Send a CAN member ping: the CAN-bound bootloader service frame (0x1B)
  * and the ping itself (0x18) are queued for the CAN bus (paced,
- * non-blocking), the ping
- * additionally goes to all connected TCP clients. Returns -1 if a frame
- * could not be sent.
+ * non-blocking). Both frames also go to UDP and all connected TCP clients.
+ * Returns -1 if a frame could not be sent.
  */
 int cs2_core_send_ping(struct cs2_core_t *core) {
     int ret = 0;
@@ -814,18 +826,36 @@ int cs2_core_send_ping(struct cs2_core_t *core) {
 	    print_can_frame(CAN_FORMAT_STRG, M_BOOTLOADER_CAN_BOUND, core->cfg.verbose);
 	}
     }
-    if (core->io.can_enqueue(core->io.arg, M_CAN_MEMBER_PING) < 0) {
+    if (core->io.udp_send(core->io.arg, M_BOOTLOADER_CAN_BOUND, CAN_ENCAP_SIZE) < 0) {
+	fprint_syslog(stderr, LOG_ERR, "can't send UDP bootloader service frame");
+	ret = -1;
+    } else {
+	print_can_frame(NET_UDP_FORMAT_STRG, M_BOOTLOADER_CAN_BOUND, core->cfg.verbose);
+    }
+    if (core->io.tcp_send_all(core->io.arg, M_BOOTLOADER_CAN_BOUND, CAN_ENCAP_SIZE) < 0) {
+	fprint_syslog(stderr, LOG_ERR, "can't send TCP bootloader service frame");
+	ret = -1;
+    } else {
+	print_can_frame(NET_TCP_FORMAT_STRG, M_BOOTLOADER_CAN_BOUND, core->cfg.verbose);
+    }
+    if (core->io.can_enqueue(core->io.arg, M_SOFTWARE_VERSION_REQUEST_MEMBER_PING) < 0) {
 	fprint_syslog(stderr, LOG_ERR, "can't queue CAN ping");
 	ret = -1;
     } else {
 	if (core->cfg.verbose)
-	    print_can_frame(CAN_FORMAT_STRG, M_CAN_MEMBER_PING, core->cfg.verbose);
+	    print_can_frame(CAN_FORMAT_STRG, M_SOFTWARE_VERSION_REQUEST_MEMBER_PING, core->cfg.verbose);
     }
-    if (core->io.tcp_send_all(core->io.arg, M_CAN_MEMBER_PING, CAN_ENCAP_SIZE) < 0) {
+    if (core->io.udp_send(core->io.arg, M_SOFTWARE_VERSION_REQUEST_MEMBER_PING, CAN_ENCAP_SIZE) < 0) {
+	fprint_syslog(stderr, LOG_ERR, "can't send UDP ping");
+	ret = -1;
+    } else {
+	print_can_frame(NET_UDP_FORMAT_STRG, M_SOFTWARE_VERSION_REQUEST_MEMBER_PING, core->cfg.verbose);
+    }
+    if (core->io.tcp_send_all(core->io.arg, M_SOFTWARE_VERSION_REQUEST_MEMBER_PING, CAN_ENCAP_SIZE) < 0) {
 	fprint_syslog(stderr, LOG_ERR, "can't send TCP ping");
 	ret = -1;
     } else {
-	print_can_frame(NET_TCP_FORMAT_STRG, M_CAN_MEMBER_PING, core->cfg.verbose);
+	print_can_frame(NET_TCP_FORMAT_STRG, M_SOFTWARE_VERSION_REQUEST_MEMBER_PING, core->cfg.verbose);
     }
     return ret;
 }
@@ -1018,15 +1048,17 @@ void cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, in
 	    }
 	} else {
 	    if ((netframe[11] == 0xEE) && (netframe[12] == 0xEE)) {
-		if (core->cfg.verbose)
-		    printf("                received CAN ping\n");
-		memcpy(netframe, M_PING_RESPONSE, 5);
-		if (core->io.udp_send(core->io.arg, netframe, CAN_ENCAP_SIZE)) {
-		    fprint_syslog_wc(stderr, LOG_ERR, "sending UDP data (CAN Ping) error:", strerror(errno));
-		} else {
-		    print_can_frame(NET_UDP_FORMAT_STRG, netframe, core->cfg.verbose);
+		if (core->slave) {
 		    if (core->cfg.verbose)
-			printf("                replied CAN ping\n");
+			printf("                received CAN ping\n");
+		    memcpy(netframe, M_PING_RESPONSE, 5);
+		    if (core->io.udp_send(core->io.arg, netframe, CAN_ENCAP_SIZE)) {
+			fprint_syslog_wc(stderr, LOG_ERR, "sending UDP data (CAN Ping) error:", strerror(errno));
+		    } else {
+			print_can_frame(NET_UDP_FORMAT_STRG, netframe, core->cfg.verbose);
+			if (core->cfg.verbose)
+			    printf("                replied CAN ping\n");
+		    }
 		}
 		if (core->cfg.cs2_config_copy)
 		    cs2_core_copy_config(core);
