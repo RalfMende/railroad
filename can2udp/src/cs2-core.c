@@ -331,12 +331,13 @@ static void cs2_core_send_config(struct cs2_core_t *core, enum cs2_core_source s
  * reassemble_data() (gio.c), distribute config change broadcasts and apply
  * the MS1 workaround. Answers are routed to the UDP broadcast destination
  * (src = CS2_SRC_UDP) or back to the sending TCP client (src = CS2_SRC_TCP,
- * tcp_socket). The frame may be modified in place (response bit, MS1
- * workaround). Forwarding the frame is the gateway's job - every frame is
+ * tcp_socket). The frame may be modified in place (e.g. MS1 workaround).
+ * Forwarding the frame is the gateway's job - every frame is
  * forwarded, regardless of what is answered here.
  */
 void cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, int tcp_socket, unsigned char *netframe) {
     uint32_t canid;
+    unsigned char reply[CAN_ENCAP_SIZE];
     char config_name[9];
     char gbs_name[MAXLINE];
 
@@ -441,12 +442,14 @@ void cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, in
 		break;
 	    }
 	}
+	memcpy(reply, netframe, CAN_ENCAP_SIZE);
+	reply[1] |= 1;
 	/* check for special copy request */
 	if (canid == 0x0040af7e) {
-	    netframe[1] |= 1;
-	    netframe[4] = 4;
-	    strcpy((char *)&netframe[5], "copy");
-	    core->io.tcp_send(core->io.arg, tcp_socket, netframe, CAN_ENCAP_SIZE);
+	    reply[4] = 4;
+	    strcpy((char *)&reply[5], "copy");
+	    if (core->io.tcp_send(core->io.arg, tcp_socket, reply, CAN_ENCAP_SIZE) < 0)
+		syslog(LOG_ERR, "%s: failed to send TCP copy acknowledgement\n", __func__);
 	    if (core->cfg.verbose)
 		printf("CAN member copy request\n");
 	    syslog(LOG_NOTICE, "%s: CAN member copy request\n", __func__);
@@ -457,14 +460,14 @@ void cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, in
 	    syslog(LOG_NOTICE, "%s: config request >%s<\n", __func__, config_name);
 	    if (core->cfg.verbose)
 		printf("%s ID 0x%08x %s\n", __func__, canid, config_name);
-	    netframe[1] |= 1;
 	    if (src == CS2_SRC_UDP) {
-		if (core->io.udp_send(core->io.arg, netframe, CAN_ENCAP_SIZE) < 0) {
+		if (core->io.udp_send(core->io.arg, reply, CAN_ENCAP_SIZE) < 0) {
 		    syslog(LOG_ERR, "%s: failed to send UDP config acknowledgement\n", __func__);
 		    break;
 		}
 	    } else {
-		core->io.tcp_send(core->io.arg, tcp_socket, netframe, CAN_ENCAP_SIZE);
+		if (core->io.tcp_send(core->io.arg, tcp_socket, reply, CAN_ENCAP_SIZE) < 0)
+		    syslog(LOG_ERR, "%s: failed to send TCP config acknowledgement\n", __func__);
 	    }
 	    if (strcmp("loks", config_name) == 0) {
 		syslog(LOG_NOTICE, "%s: sending lokomotive.cs2\n", __func__);

@@ -1302,11 +1302,25 @@ class TestNativeGateway(unittest.TestCase):
         expected = model_config_stream(content, 0x00401234)
         got = split_frames(recv_exact(client, len(expected) * 13, timeout=10))
         self.assertEqual(got, expected)
-        # the gateway forwards every frame: the request also appears on the CAN
-        # bus - with the response bit set, because the core answers (and modifies
-        # the frame in place) before the gateway forwards it
-        self.assertEqual(self.gw.bus_recv(),
-                         frame_to_can(bytes([0x00, 0x41, 0x12, 0x34, 0x08]) + b"loks\0\0\0\0"))
+        self.assertEqual(self.gw.bus_recv(), frame_to_can(request))
+        self.assertIsNone(self.gw.udp_recv(0.2))
+
+    def test_tcp_unknown_config_request_is_forwarded_unchanged(self):
+        client = self.gw.connect()
+        request = bytes([0x00, 0x40, 0x12, 0x34, 0x08]) + b"lokinfo\0"
+        client.sendall(request)
+        self.assertEqual(recv_exact(client, 13), bytes([0x00, 0x41]) + request[2:])
+        self.assertEqual(self.gw.bus_recv(), frame_to_can(request))
+        self.assertIsNone(self.gw.udp_recv(0.2))
+
+    def test_tcp_copy_request_is_forwarded_unchanged(self):
+        client = self.gw.connect()
+        request = bytes([0x00, 0x40, 0xAF, 0x7E, 0x08]) + b"1234\0\0\0\0"
+        client.sendall(request)
+        self.assertEqual(recv_exact(client, 13),
+                         bytes([0x00, 0x41, 0xAF, 0x7E, 0x04]) + b"copy\0\0\0\0")
+        self.assertEqual(self.gw.bus_recv(), frame_to_can(request))
+        self.assertIsNone(self.gw.udp_recv(0.2))
 
     def test_invalid_page_request_is_survived(self):
         client = self.gw.connect()

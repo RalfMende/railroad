@@ -170,17 +170,13 @@ def check_data(frame):
     answered is True if the core handles the frame locally (config data
     request for a name served by can2lan, copy request, config stream of an
     initiated copy request), frame_out is the frame as forwarded by the
-    gateway afterwards (cs2_core_handle_frame() runs before the forwarding
-    and modifies the frame in place).
+    gateway afterwards.
 
     Modelled branches (verified against the C code):
-    - 0x40 config data request: ack with response bit set in place; the
+    - 0x40 config data request: ack with response bit set in a copy; the
       names loks, mags, gbs, gbs-N, fs, lokstat, magstat, gbsstat, fsstat
       and the copy request 0x0040af7e are answered locally, every other
-      name is only acknowledged. All requests reach CAN with the response
-      bit already set (netframe[1] |= 1 happens before the name lookup) -
-      a device on the bus sees a supposed response instead of a request
-      (suspicious, not backed by the specification).
+      name is only acknowledged. The original request is forwarded to CAN.
     - 0x42 config data stream: a broadcast start (DLC 7) accepts the sender
       hash; the copy response uses 0x0300. This stateless model cannot
       determine whether a data frame belongs to an active broadcast.
@@ -190,10 +186,7 @@ def check_data(frame):
     canid = int.from_bytes(frame[0:4], "big")
     cmd = canid & 0xFFFF0000
     if cmd == 0x00400000:
-        out[1] |= 1
         if canid == 0x0040AF7E:
-            out[4] = 4
-            out[5:10] = b"copy\0"
             return True, bytes(out)
         name = bytes(frame[5:13]).split(b"\x00")[0]
         if name in LOCAL_CONFIG_NAMES or name.startswith(b"gbs-"):
@@ -567,31 +560,24 @@ class TestTcpToCan(unittest.TestCase):
         self.assertEqual(frame_to_can(out)[0], 0x00000100 | CAN_EFF_FLAG)
 
     def test_known_config_request_answered_and_forwarded(self):
-        # answered locally with a config stream and still forwarded to CAN -
-        # with the response bit set (the core runs before the forwarding)
         for name in (b"loks", b"mags", b"gbs", b"gbs-3", b"fs",
                      b"lokstat", b"magstat", b"gbsstat", b"fsstat"):
-            answered, out = check_data(self._request(name))
+            request = self._request(name)
+            answered, out = check_data(request)
             self.assertTrue(answered, name)
-            self.assertEqual(out[1], 0x41, name)
+            self.assertEqual(out, request, name)
 
     def test_copy_request_answered_and_forwarded(self):
-        answered, out = check_data(self._request(b"", can_id=0x0040AF7E))
+        request = self._request(b"", can_id=0x0040AF7E)
+        answered, out = check_data(request)
         self.assertTrue(answered)
-        self.assertEqual(out[1], 0x41)
-        self.assertEqual(out[4], 4)
-        self.assertEqual(out[5:9], b"copy")
+        self.assertEqual(out, request)
 
-    def test_unknown_config_request_forwarded_with_response_bit(self):
-        # CHARACTERIZATION of the current C behaviour, not a requirement:
-        # cs2_core_handle_frame() sets the response bit in place
-        # (netframe[1] |= 1) BEFORE the name lookup, so a request for a name
-        # can2lan does not serve itself (lokinfo, loknamen, ...) is forwarded
-        # to CAN as a *response* frame. A device on the bus will not answer it.
-        answered, out = check_data(self._request(b"lokinfo"))
+    def test_unknown_config_request_forwarded_unchanged(self):
+        request = self._request(b"lokinfo")
+        answered, out = check_data(request)
         self.assertFalse(answered)
-        self.assertEqual(out[1], 0x41)
-        self.assertEqual(out[1] & 1, 1)
+        self.assertEqual(out, request)
 
     def test_config_stream_copy_hash_handled_and_forwarded(self):
         # hash 0x0300 (GETCONFIG_RESPONSE) is forwarded and received
