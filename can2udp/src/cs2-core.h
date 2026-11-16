@@ -17,8 +17,7 @@
  * is delegated to the gateway through struct cs2_core_io. The legacy
  * secondary TCP ASCII protocol remains implemented unchanged in
  * ascii-frame.c. In master mode cs2_core_init() sends the 60113 start
- * sequence and arms the periodic CAN member ping, which cs2_core_tick()
- * then services.
+ * sequence and arms the periodic CAN member ping timer.
  */
 
 #ifndef _CS2_CORE_H_
@@ -60,7 +59,7 @@ struct cs2_core_t {
     struct cs2_core_io io;
     int slave;				/* -S: slave mode - answer CAN member pings, don't send them */
     int ms1_workaround;			/* -m: fake cyclic MS1 slave monitoring response */
-    int ping_timer;			/* master mode: seconds until the next CAN member ping, 0 = not armed */
+    int event_fd;			/* core event descriptor, -1 if none */
 };
 
 /* shared with the gateway (can2lan.c) and gio.c */
@@ -72,10 +71,11 @@ extern char *cs2_configs[][2];
 /* initialize the core context and local CS2 config data; call after parsing options and preparing gateway I/O.
    config_dir is normalized in place. The context must be zero-initialized by the caller. In master mode the
    60113 start sequence is sent first and the periodic CAN member ping timer is armed. Returns -1 on path or
-   start-frame errors. */
+   start-frame or timer errors. */
 int cs2_core_init(struct cs2_core_t *core, const struct cs2_core_io *io, char *config_dir);
-/* 1-second tick from the gateway main loop: services the master-mode ping timer */
-void cs2_core_tick(struct cs2_core_t *core);
+/* dispatch a ready core event descriptor and release core event resources */
+int cs2_core_handle_event(struct cs2_core_t *core);
+void cs2_core_close(struct cs2_core_t *core);
 int cs2_core_send_start_frames(struct cs2_core_t *core);
 int cs2_core_send_ping(struct cs2_core_t *core);
 /* answer a CAN member ping (slave mode): queued for the CAN bus, sent to UDP and all TCP clients */

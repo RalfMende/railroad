@@ -199,7 +199,7 @@ int main(int argc, char **argv) {
     socklen_t caddrlen = sizeof(caddr);
     socklen_t tcp_client_length = sizeof(tcp_addr);
     fd_set all_fds, read_fds, write_fds;
-    int free_slots, rdlen, short_wait;
+    int free_slots, rdlen, exit_status = EXIT_SUCCESS;
     long can_wait;
     int s = 0;
     unsigned int tcp_connections = 0;
@@ -540,14 +540,17 @@ int main(int argc, char **argv) {
     sigaction(SIGPIPE, &sigact, NULL);
     sigemptyset(&emptyset);
 
-    /* the select() timeout is set in the loop: 1 sec for the core's periodic
-       CAN member ping, shorter while CAN frames are waiting for their pacing time */
+    /* monitor transport descriptors and the core's event descriptor */
     FD_ZERO(&all_fds);
     FD_SET(sc, &all_fds);
     FD_SET(sa, &all_fds);
     FD_SET(st, &all_fds);
     FD_SET(st2, &all_fds);
     max_fds = MAX(MAX(MAX(sc, sa), st), st2);
+    if (core.event_fd >= 0) {
+	FD_SET(core.event_fd, &all_fds);
+	max_fds = MAX(max_fds, core.event_fd);
+    }
 
     while (do_loop) {
 	/* send what the clients couldn't take yet, close clients which can't keep up */
@@ -564,11 +567,9 @@ int main(int argc, char **argv) {
 	if ((can_wait >= 0) && (can_wait < 1000000)) {
 	    ts.tv_sec = 0;
 	    ts.tv_nsec = can_wait * 1000;
-	    short_wait = 1;
 	} else {
 	    ts.tv_sec = 1;
 	    ts.tv_nsec = 0;
-	    short_wait = 0;
 	}
 
 	read_fds = all_fds;
@@ -590,17 +591,21 @@ int main(int argc, char **argv) {
 
 	nready = pselect(max_fds + 1, &read_fds, &write_fds, NULL, &ts, &emptyset);
 	if (nready == 0) {
-	    /* woke up only because the next CAN frame is due */
-	    if (short_wait)
-		continue;
-	    /* 1-second tick: services the core's master-mode ping timer */
-	    cs2_core_tick(&core);
 	    continue;
 	} else if (nready < 0) {
 	    if (!background)
 		fprintf(stderr, "select exception: [%d] %s\n", nready, strerror(errno));
 	    syslog(LOG_WARNING, "select exception: [%d] %s\n", nready, strerror(errno));
 	    continue;
+	}
+
+	if (core.event_fd >= 0 && FD_ISSET(core.event_fd, &read_fds)) {
+	    if (cs2_core_handle_event(&core) < 0) {
+		exit_status = EXIT_FAILURE;
+		break;
+	    }
+	    if (--nready <= 0)
+		continue;
 	}
 
 	/* TCP clients which can take more of their queued data */
@@ -798,6 +803,7 @@ int main(int argc, char **argv) {
 	    }
 	}
     }
+    cs2_core_close(&core);
     if (page_name)
 	free_track_file(page_name);
     if (page_name != core.cfg.page_name)
@@ -818,5 +824,5 @@ int main(int argc, char **argv) {
 	    exit(EXIT_FAILURE);
 	}
     }
-    return (EXIT_SUCCESS);
+    return exit_status;
 }

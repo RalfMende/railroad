@@ -1355,6 +1355,25 @@ class TestNativeGateway(unittest.TestCase):
         # TCP clients get the ping as well
         self.assertEqual(recv_exact(client, 13), M_CAN_MEMBER_PING)
 
+    def test_master_ping_timer_runs_during_continuous_udp_activity(self):
+        client = self.gw.connect()
+        start = time.monotonic()
+        ping_times = []
+        deadline = start + 2 * PING_TIME + 2
+        while len(ping_times) < 2 and time.monotonic() < deadline:
+            self.gw.udp_send(b"\x00")
+            frame = self.gw.bus_recv(0.02)
+            if frame is not None:
+                self.assertEqual(frame, frame_to_can(M_BOOTLOADER_CAN_BOUND))
+                ping_times.append(time.monotonic())
+                self.assertEqual(self.gw.bus_recv(), frame_to_can(M_CAN_MEMBER_PING))
+                self.assertEqual(recv_exact(client, 13), M_CAN_MEMBER_PING)
+        self.assertEqual(len(ping_times), 2, "periodic pings stopped during UDP activity")
+        self.assertGreater(ping_times[0] - start, PING_TIME - 2)
+        self.assertLess(ping_times[0] - start, PING_TIME + 2)
+        self.assertGreater(ping_times[1] - ping_times[0], PING_TIME - 1)
+        self.assertLess(ping_times[1] - ping_times[0], PING_TIME + 1)
+
     # ---- lifecycle
     def test_terminates_cleanly_on_sigterm(self):
         self.gw.connect()

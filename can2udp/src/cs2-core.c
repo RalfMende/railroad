@@ -17,6 +17,7 @@
 #include "cs2-core.h"
 #include "ascii-frame.h"
 #include "read-cs2-config.h"
+#include <sys/timerfd.h>
 
 static char *CAN_FORMAT_STRG     = "      CAN->   0x%08X R [%d]";
 static char *NET_UDP_FORMAT_STRG = "      UDP->   0x%08X   [%d]";
@@ -87,18 +88,19 @@ extern char **page_name;
  * caller; options parsed before this call (slave mode, verbose, ...) are
  * preserved. The config clone state machine starts inactive.
  * Master mode: the 60113 start sequence is sent to the CAN bus first and
- * the periodic CAN member ping timer (PING_TIME seconds, serviced by
- * cs2_core_tick()) is armed. Slave mode: neither happens - the core only
- * answers pings. Returns -1 if paths are too long or start frames could
- * not be sent.
+ * the periodic CAN member ping timer (PING_TIME seconds) is armed. Slave
+ * mode: neither happens - the core only answers pings. Returns -1 if paths
+ * are too long, start frames could not be sent, or the timer could not start.
  */
 int cs2_core_init(struct cs2_core_t *core, const struct cs2_core_io *io, char *config_dir) {
     char track_file[MAXLINE];
     char loco_file[MAXLINE];
     size_t dir_len;
     int path_len;
+    struct itimerspec timer = { { PING_TIME, 0 }, { PING_TIME, 0 } };
 
     core->io = *io;
+    core->event_fd = -1;
     core->cfg.state = CS2_STATE_INACTIVE;
     core->cfg.track_index = MAX_TRACK_PAGE;
     if (core->slave)
@@ -144,22 +146,49 @@ int cs2_core_init(struct cs2_core_t *core, const struct cs2_core_io *io, char *c
 	syslog(LOG_WARNING, "%s: can't read loco data from %s\n", __func__, loco_file);
     if (cs2_core_send_start_frames(core) < 0)
 	return -1;
-    core->ping_timer = PING_TIME;
+    core->event_fd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
+    if (core->event_fd < 0) {
+	fprint_syslog_wc(stderr, LOG_ERR, "can't create core timer:", strerror(errno));
+	return -1;
+    }
+    if (core->event_fd >= FD_SETSIZE) {
+	fprint_syslog(stderr, LOG_ERR, "core event descriptor exceeds select limit");
+	cs2_core_close(core);
+	return -1;
+    }
+    if (timerfd_settime(core->event_fd, 0, &timer, NULL) < 0) {
+	fprint_syslog_wc(stderr, LOG_ERR, "can't start core timer:", strerror(errno));
+	cs2_core_close(core);
+	return -1;
+    }
     return 0;
 }
 
-/*
- * 1-second tick from the gateway main loop: services the master-mode ping
- * timer armed by cs2_core_init(). When it elapses, the CAN member ping is
- * sent and the timer is re-armed. Does nothing while the timer is not
- * armed (slave mode).
- */
-void cs2_core_tick(struct cs2_core_t *core) {
-    if (core->ping_timer <= 0)
-	return;
-    if (--core->ping_timer == 0) {
-	core->ping_timer = PING_TIME;
-	cs2_core_send_ping(core);
+int cs2_core_handle_event(struct cs2_core_t *core) {
+    uint64_t expirations;
+    ssize_t n = read(core->event_fd, &expirations, sizeof(expirations));
+
+    if (n < 0 && (errno == EINTR || errno == EAGAIN))
+	return 0;
+    if (n != sizeof(expirations)) {
+	if (n < 0)
+	    fprint_syslog_wc(stderr, LOG_ERR, "can't read core timer:", strerror(errno));
+	else
+	    fprint_syslog(stderr, LOG_ERR, "short read from core timer");
+	return -1;
+    }
+    if (expirations > 1)
+	syslog(LOG_WARNING, "%s: missed %llu ping timer intervals\n",
+	       __func__, (unsigned long long)(expirations - 1));
+    cs2_core_send_ping(core);
+    return 0;
+}
+
+void cs2_core_close(struct cs2_core_t *core) {
+    if (core->event_fd >= 0) {
+	if (close(core->event_fd) < 0)
+	    fprint_syslog_wc(stderr, LOG_ERR, "can't close core timer:", strerror(errno));
+	core->event_fd = -1;
     }
 }
 
@@ -185,7 +214,7 @@ int cs2_core_send_start_frames(struct cs2_core_t *core) {
 /*
  * Send a CAN member ping: the CAN-bound bootloader service frame (0x1B)
  * and the ping itself (0x18) are queued for the CAN bus (paced,
- * non-blocking - this is called from the gateway main loop), the ping
+ * non-blocking), the ping
  * additionally goes to all connected TCP clients. Returns -1 if a frame
  * could not be sent.
  */
