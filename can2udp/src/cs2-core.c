@@ -425,6 +425,8 @@ void cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, in
 	}
 	break;
     case (0x00400000UL):	/* config data */
+	if (src == CS2_SRC_TCP && core->slave)
+	    break;
 	if (src == CS2_SRC_UDP) {
 	    /* check for initiated config request */
 	    if (canid == 0x0040af7e) {

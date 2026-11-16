@@ -1400,6 +1400,20 @@ class TestNativeGatewaySlave(unittest.TestCase):
         self.assertEqual(self.gw.bus_recv(), frame_to_can(request))
         self.assertIsNone(self.gw.udp_recv(0.2))
 
+    def test_slave_does_not_answer_tcp_config_requests(self):
+        client = self.gw.connect()
+        requests = [
+            bytes([0x00, 0x40, 0x12, 0x34, 0x08]) + b"loks\0\0\0\0",
+            bytes([0x00, 0x40, 0x12, 0x34, 0x08]) + b"lokinfo\0",
+            bytes([0x00, 0x40, 0xAF, 0x7E, 0x08]) + b"1234\0\0\0\0",
+        ]
+        client.sendall(b"".join(requests))
+        self.assertEqual([self.gw.bus_recv() for _ in requests], [frame_to_can(r) for r in requests])
+        self.assertIsNone(self.gw.udp_recv(0.2))
+        client.settimeout(0.2)
+        with self.assertRaises(socket.timeout):
+            client.recv(1)
+
     def test_slave_answers_can_ping_on_all_transports(self):
         client = self.gw.connect()
         self.gw.bus_send(0x00304711, b"", dlc=0)
