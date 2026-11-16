@@ -864,15 +864,16 @@ class TestNativeStreamReception(LibTestCase):
 class Gateway:
     """The real can2lan binary, with the test acting as CAN bus, UDP peer and TCP client."""
 
-    def __init__(self, test, args=(), sndbuf=4096, config_dir=CONFIG_DIR):
+    def __init__(self, test, args=(), sndbuf=4096, config_dir=CONFIG_DIR, ports=None):
         self.test = test
-        self.ports = {}
-        for name, kind in (("udp_in", socket.SOCK_DGRAM), ("udp_out", socket.SOCK_DGRAM),
-                           ("tcp", socket.SOCK_STREAM), ("tcp2", socket.SOCK_STREAM)):
-            probe = socket.socket(socket.AF_INET, kind)
-            probe.bind(("127.0.0.1", 0))
-            self.ports[name] = probe.getsockname()[1]
-            probe.close()
+        self.ports = dict(ports) if ports is not None else {}
+        if ports is None:
+            for name, kind in (("udp_in", socket.SOCK_DGRAM), ("udp_out", socket.SOCK_DGRAM),
+                               ("tcp", socket.SOCK_STREAM), ("tcp2", socket.SOCK_STREAM)):
+                probe = socket.socket(socket.AF_INET, kind)
+                probe.bind(("127.0.0.1", 0))
+                self.ports[name] = probe.getsockname()[1]
+                probe.close()
         self.bus, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM)
         self.udp_rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.udp_rx.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1 << 20)
@@ -1416,6 +1417,24 @@ class TestNativeGateway(unittest.TestCase):
         self.gw.connect()
         self.gw.proc.send_signal(signal.SIGTERM)
         self.assertEqual(self.gw.proc.wait(5), 0)
+
+    def check_restart_with_connected_tcp_client(self, client):
+        time.sleep(0.1)
+        self.gw.proc.send_signal(signal.SIGTERM)
+        self.assertEqual(self.gw.proc.wait(5), 0)
+        client.settimeout(2)
+        self.assertEqual(client.recv(1), b"")
+        ports = self.gw.ports
+        self.gw.stop()
+        restarted = Gateway(self, ports=ports)
+        restarted.connect()
+        restarted.connect_ascii()
+
+    def test_restart_with_connected_tcp_client(self):
+        self.check_restart_with_connected_tcp_client(self.gw.connect())
+
+    def test_restart_with_connected_secondary_tcp_client(self):
+        self.check_restart_with_connected_tcp_client(self.gw.connect_ascii())
 
 
 class TestNativeBroadcastGateway(unittest.TestCase):

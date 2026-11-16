@@ -419,6 +419,10 @@ int main(int argc, char **argv) {
 	fprintf(stderr, "creating TCP socket error: %s\n", strerror(errno));
 	exit(EXIT_FAILURE);
     }
+    if (setsockopt(st, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0) {
+	fprintf(stderr, "error setting TCP socket reuse option: %s\n", strerror(errno));
+	exit(EXIT_FAILURE);
+    }
 
     tcp_addr.sin_family = AF_INET;
     tcp_addr.sin_addr.s_addr = htonl(INADDR_ANY);
@@ -441,6 +445,10 @@ int main(int argc, char **argv) {
     st2 = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (st2 < 0) {
 	fprintf(stderr, "creating second TCP socket error: %s\n", strerror(errno));
+	exit(EXIT_FAILURE);
+    }
+    if (setsockopt(st2, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on)) < 0) {
+	fprintf(stderr, "error setting second TCP socket reuse option: %s\n", strerror(errno));
 	exit(EXIT_FAILURE);
     }
     tcp_addr2.sin_family = AF_INET;

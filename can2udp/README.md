@@ -8,6 +8,10 @@ This Git (OpenWRT feed) contains files to exchange data between CAN and LAN:
 can2udp is working fine with Rocrail and Gleisbox (60113). The can2lan aims
 to emulate the CS2 CAN2LAN protocol more closely.
 
+The can2lan TCP listeners allow an immediate restart after connected clients
+have been disconnected. When upgrading from an older version, the first
+restart may still have to wait for existing TCP connections to leave TIME_WAIT.
+
 The programm ist based on:
 http://streaming.maerklin.de/public-media/cs2/cs2CAN-Protokoll-2_0.pdf
 
