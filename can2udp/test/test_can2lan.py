@@ -9,7 +9,7 @@ be verified without a CAN interface or the OpenWrt toolchain:
 - CAN receive path         src/can2lan.c main(): EFF check, config-change
                            broadcast detection, forwarding to UDP and all
                            TCP clients
-- send_tcp_config_data()   src/gio.c     zlib-compressed, CRC-protected
+- cs2_config_send_stream() src/cs2-core.c zlib-compressed, CRC-protected
                            config data stream as TCP frame sequence
 - tcp_rx_feed()            src/can2lan.c TCP receive reassembly
 - frame_to_can()           src/gio.c     13-byte UDP/TCP packet -> CAN frame
@@ -18,7 +18,7 @@ be verified without a CAN interface or the OpenWrt toolchain:
 - cs2_core_handle_frame()  src/cs2-core.c frames answered locally
                            (config requests, streams) and forwarded
                            (formerly check_data() in src/can2lan.c)
-- reassemble_data()        src/gio.c     config data stream reception
+- cs2_config_reassemble()  src/cs2-core.c config data stream reception
                            (length/CRC checks, DLC abort)
 
 Wire format (spec cs2CAN-Protokoll-2_0, chapter "CAN Anschluss"):
@@ -42,7 +42,7 @@ CAN_EFF_MASK = 0x1FFFFFFF
 BC_CHANGE_MASK = 0x1FFFF00
 BC_CHANGE_ID = 0x0434700
 
-# from src/gio.c send_tcp_config_data(): request -> stream CAN-ID
+# from src/cs2-core.c cs2_config_send_stream(): request -> stream CAN-ID
 STREAM_CLEAR_RESP = 0xFFFEFFFF
 STREAM_SET_CMD = 0x00020000
 
@@ -50,7 +50,7 @@ STREAM_SET_CMD = 0x00020000
 LOCAL_CONFIG_NAMES = {b"loks", b"mags", b"gbs", b"fs",
                       b"lokstat", b"magstat", b"gbsstat", b"fsstat"}
 
-# from src/gio.c reassemble_data(): upper bound for announced stream sizes
+# from src/cs2-core.c cs2_config_reassemble(): upper bound for announced stream sizes
 MAX_CONFIG_STREAM_SIZE = 4 * 1024 * 1024
 
 
@@ -109,7 +109,7 @@ def can_receive_path(can_id, dlc, data, filters=()):
 
 
 def send_tcp_config_data(content, canid, broadcast=False, fill=0):
-    """Model of send_tcp_config_data() in src/gio.c with CRC|COMPRESSED.
+    """Model of cs2_config_send_stream() in src/cs2-core.c with CRC|COMPRESSED.
 
     Returns the list of 13-byte TCP frames: one start frame (DLC 6, or
     DLC 7 with fill byte for broadcasts) followed by DLC 8 data frames.
@@ -200,10 +200,10 @@ def check_data(frame):
 
 
 class ReassembleData:
-    """Model of reassemble_data() in src/gio.c (stream reception).
+    """Model of cs2_config_reassemble() in src/cs2-core.c (stream reception).
 
     Implements the announced-length checks, the DLC abort rule and the
-    CRC verification of config_write(). Returns the inflated content on
+    CRC verification of cs2_config_write(). Returns the inflated content on
     success, None while the stream is in progress, and raises
     StreamAborted on any protocol violation.
     """
@@ -253,7 +253,7 @@ class ReassembleData:
         self.buf = bytearray()
 
     def _finish(self):
-        # config_write(): verify CRC before inflating and writing
+        # cs2_config_write(): verify CRC before inflating and writing
         if crc_ccitt(bytes(self.buf)) != self.crc:
             raise self.StreamAborted("CRC mismatch")
         inflated_size = int.from_bytes(self.buf[:4], "big")
@@ -390,7 +390,7 @@ class TestCanReceivePath(unittest.TestCase):
 
 
 class TestConfigDataStream(unittest.TestCase):
-    """Config data stream CAN -> TCP (send_tcp_config_data in gio.c)."""
+    """Config data stream CAN -> TCP (cs2_config_send_stream in cs2-core.c)."""
 
     CONTENT = b"[lokomotive]\nname\n .name=BR 140\n"
     REQ_ID = 0x00401234  # config data request CAN-ID (command 0x20)
@@ -612,7 +612,7 @@ class TestTcpToCan(unittest.TestCase):
 
 
 class TestStreamReception(unittest.TestCase):
-    """Config data stream reception TCP -> file (reassemble_data in gio.c)."""
+    """Config data stream reception TCP -> file (cs2_config_reassemble in cs2-core.c)."""
 
     CONTENT = b"[lokomotive]\nname\n .name=BR 140\n"
 

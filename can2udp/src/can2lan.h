@@ -146,12 +146,8 @@ struct MS1_Node_Buffer {
 };
 
 /* prototypes */
-uint8_t * read_config_file(char *filename, char *config_dir, uint32_t *nbytes);
 int time_stamp(char *timestamp);
 uint16_t generateHash(uint32_t uid);
-char **read_track_file(char *filename, char **page_name);
-int send_tcp_config_data(char *filename, char *config_dir, uint32_t canid, int *tcp_socket_list, int socket_nmbr, int flags, uint8_t fill);
-int send_udp_config_data(char *filename, char *config_dir, uint32_t canid, int udp_socket, struct sockaddr *udp_addr);
 void print_can_frame(char *format_string, unsigned char *netframe, int verbose);
 int net_to_net(int net_socket, struct sockaddr *net_addr, unsigned char *netframe, int length);
 int frame_to_can(int can_socket, unsigned char *netframe);
@@ -173,7 +169,6 @@ int ms1_print_handles(struct id_node *node);
 struct id_node *ms1_search_for_id(struct id_node *node, uint32_t id);
 struct id_node *ms1_search_for_slave(struct id_node *node, uint8_t slave_node);
 int ms1_add_id(struct id_node *root_node, uint32_t id, uint8_t slave_node);
-int reassemble_data(struct cs2_config_data_t *config_data, unsigned char *netframe);
 uint16_t CRCCCITT(uint8_t *data, size_t length, uint16_t seed);
 extern int write_pid_file(const char *pid_fn);
 void free_track_file(char **page_name);

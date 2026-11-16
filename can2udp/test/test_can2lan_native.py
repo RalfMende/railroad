@@ -5,10 +5,10 @@ Tests of the REAL can2lan C code (no Python models of the C logic).
 test_can2lan.py models the wire format in Python. This file builds the real
 sources with the system gcc and tests them:
 
-1. gio.c is built as a shared library and tested through ctypes: transmit
-   queues use socketpair() sockets for TCP and CAN, config stream reception
-   uses an isolated temporary file. The expected wire bytes come from the
-   specification models in test_can2lan.py.
+1. gio.c and cs2-core.c are built as a shared library and tested
+   through ctypes: transmit queues use socketpair() sockets for TCP and CAN,
+   config stream reception uses an isolated temporary file. The expected wire
+   bytes come from the specification models in test_can2lan.py.
 
 2. TestNativeGateway: the complete can2lan binary runs against real UDP and
    TCP sockets. The PF_CAN socket is replaced via LD_PRELOAD
@@ -55,7 +55,7 @@ MAX_TCP_CONN = 64
 CAN_TX_QUEUE_LEN = 256
 CAN_TX_RETRY_US = 5000
 TCP_TX_QUEUE_MAX = 96 * 1024
-MAX_CONFIG_STREAM_SIZE = 4 * 1024 * 1024  # implementation limit in gio.c
+MAX_CONFIG_STREAM_SIZE = 4 * 1024 * 1024  # implementation limit in cs2-core.c
 CRC, COMPRESSED, BCCHANGE = 0x01, 0x02, 0x04
 
 CAN_FRAME = struct.Struct("=IB3x8s")  # struct can_frame: 16 bytes
@@ -120,13 +120,15 @@ def setUpModule():
 
 
 def load_lib():
-    """gio.c as shared library, for the tests of its transmit queues."""
+    """Build the gateway helpers and core as a shared library for native tests."""
     global LIB
     if LIB:
         return
     s = lambda name: os.path.join(SRC, name)  # noqa: E731
     _gcc(["-shared", "-fPIC", "-I", SRC, "-o", os.path.join(BUILD, "libgio.so"),
-          s("gio.c"), s("crc-ccitt.c"), os.path.join(HERE, "native", "gio_stubs.c"), "-lz"])
+          s("gio.c"), s("crc-ccitt.c"), s("ascii-frame.c"), s("read-cs2-config.c"),
+          os.path.join(HERE, "native", "core_config_test.c"),
+          os.path.join(HERE, "native", "gio_stubs.c"), "-lz"])
     LIB = ctypes.CDLL(os.path.join(BUILD, "libgio.so"))
     c_int, c_void_p, c_char_p = ctypes.c_int, ctypes.c_void_p, ctypes.c_char_p
     for name, argtypes, restype in [
@@ -142,9 +144,9 @@ def load_lib():
         ("can_tx_enqueue", [c_char_p], c_int),
         ("can_tx_free", [], c_int),
         ("can_tx_service", [c_int], ctypes.c_long),
-        ("send_tcp_config_data", [c_char_p, c_char_p, ctypes.c_uint32, ctypes.POINTER(c_int),
-                                  c_int, c_int, ctypes.c_uint8], c_int),
-        ("reassemble_data", [ctypes.POINTER(ConfigData), c_char_p], c_int),
+        ("test_config_send_stream", [c_char_p, c_char_p, ctypes.c_uint32, ctypes.POINTER(c_int),
+                                     c_int, c_int, ctypes.c_uint8], c_int),
+        ("test_config_reassemble", [ctypes.POINTER(ConfigData), c_char_p], c_int),
     ]:
         func = getattr(LIB, name)
         func.argtypes = argtypes
@@ -543,10 +545,10 @@ class TestNativeCanQueue(LibTestCase):
         self.assertEqual([f[2][:2] for f in frames], [struct.pack(">H", 2)])
 
 
-# --------------------------------------------- gio.c: config data streams
+# ---------------------------------------------- core: config data streams
 
 class TestNativeConfigStream(LibTestCase):
-    """send_tcp_config_data() of gio.c against the specification model."""
+    """Core config stream sender against the specification model."""
 
     REQ_ID = 0x00401234
 
@@ -560,8 +562,8 @@ class TestNativeConfigStream(LibTestCase):
 
     def send(self, clients, name=b"lokomotive.cs2", flags=CRC | COMPRESSED, fill=0, canid=None):
         fds = (ctypes.c_int * len(clients))(*[c.fd for c in clients])
-        return LIB.send_tcp_config_data(name, self.dir.encode() + b"/", canid or self.REQ_ID, fds,
-                                        len(clients), flags, fill)
+        return LIB.test_config_send_stream(name, self.dir.encode() + b"/", canid or self.REQ_ID, fds,
+                                           len(clients), flags, fill)
 
     def test_stream_matches_model(self):
         content = b"[lokomotive]\nname\n .name=BR 140\n" * 20
@@ -621,7 +623,7 @@ class TestNativeConfigStream(LibTestCase):
 
 
 class TestNativeStreamReception(LibTestCase):
-    """Exercise gio.c's real stream receiver against an isolated file."""
+    """Exercise the core stream receiver against an isolated file."""
 
     CONTENT = b"[lokomotive]\nname\n .name=BR 140\n"
     ORIGINAL = b"existing configuration\n"
@@ -644,7 +646,7 @@ class TestNativeStreamReception(LibTestCase):
 
     def feed(self, frames):
         with quiet_stderr():
-            return [LIB.reassemble_data(ctypes.byref(self.cfg), frame) for frame in frames]
+            return [LIB.test_config_reassemble(ctypes.byref(self.cfg), frame) for frame in frames]
 
     def content(self):
         with open(self.path, "rb") as fp:
@@ -666,14 +668,14 @@ class TestNativeStreamReception(LibTestCase):
         self.addCleanup(sender.close)
         self.addCleanup(peer.close)
         self.cfg.state = 1  # CS2_STATE_NORMAL_CONFIG
-        self.cfg.next = 0
+        self.cfg.next = 1  # loks is already being copied; mags is next
         self.cfg.cs2_tcp_socket = sender.fileno()
         return peer
 
     def assert_copy_aborted(self, peer, frames):
         self.assertEqual(self.feed(frames)[-1], 0)
         self.assertEqual(self.cfg.state, 0)
-        self.assertEqual(self.cfg.next, 0)
+        self.assertEqual(self.cfg.next, 1)
         self.assertFalse(self.cfg.start or self.cfg.stream)
         self.assertFalse(self.cfg.deflated_data or self.cfg.inflated_data)
         peer.settimeout(0.2)
@@ -790,6 +792,14 @@ class TestNativeStreamReception(LibTestCase):
         self.assertEqual(recv_exact(peer, 13),
                          bytes([0x00, 0x40, 0xAF, 0x7E, 0x08]) + b"mags\0\0\0\0")
         self.assertEqual(self.cfg.state, 1)
+        self.assertEqual(self.cfg.next, 2)
+
+    def test_copy_stops_if_next_request_cannot_be_sent(self):
+        peer = self.start_copy()
+        peer.close()
+        self.assertEqual(self.feed(self.frames())[-1], 0)
+        self.assertEqual(self.content(), self.CONTENT)
+        self.assertEqual(self.cfg.state, 0)
         self.assertEqual(self.cfg.next, 1)
 
     def test_invalid_dlc_aborts_and_ignores_remaining_frames(self):
@@ -1409,6 +1419,46 @@ class TestNativeGateway(unittest.TestCase):
 
 
 class TestNativeBroadcastGateway(unittest.TestCase):
+    def test_can_config_change_sends_core_stream_to_all_tcp_clients(self):
+        config_dir = tempfile.mkdtemp(prefix="can2lan-config-change-")
+        self.addCleanup(shutil.rmtree, config_dir, True)
+        shutil.copytree(CONFIG_DIR, config_dir, dirs_exist_ok=True)
+        content = b"[config]\n.name=change\n"
+        with open(os.path.join(config_dir, "mags"), "wb") as fp:
+            fp.write(content)
+        gw = Gateway(self, config_dir=config_dir)
+        self.assertIsNotNone(gw.bus_recv())
+        clients = [gw.connect(), gw.connect()]
+        canid = 0x00434711
+        data = b"mags\0\0\0\0"
+        gw.bus_send(canid, data)
+        expected = model_config_stream(content, canid, broadcast=True, fill=0x11)
+        forwarded = frame_to_net(canid | CAN_EFF_FLAG, data, 8)
+        self.assertEqual(gw.udp_recv(), forwarded)
+        for client in clients:
+            self.assertEqual(split_frames(recv_exact(client, (len(expected) + 1) * 13)),
+                             expected + [forwarded])
+
+    def test_core_copy_requests_next_config_after_stream(self):
+        config_dir = tempfile.mkdtemp(prefix="can2lan-core-copy-")
+        self.addCleanup(shutil.rmtree, config_dir, True)
+        shutil.copytree(CONFIG_DIR, config_dir, dirs_exist_ok=True)
+        gw = Gateway(self, args=("-k",), config_dir=config_dir)
+        self.assertIsNotNone(gw.bus_recv())
+        client = gw.connect()
+        client.sendall(M_CAN_PING_ANSWER)
+        self.assertEqual(recv_exact(client, 13), bytes.fromhex("0040af7e08") + b"loks\0\0\0\0")
+        self.assertEqual(gw.bus_recv(), frame_to_can(M_CAN_PING_ANSWER))
+
+        content = b"[lokomotive]\n .name=copied\n"
+        frames = model_config_stream(content, 0x00420300)
+        client.sendall(b"".join(frames))
+        self.assertEqual(recv_exact(client, 13), bytes.fromhex("0040af7e08") + b"mags\0\0\0\0")
+        self.assertEqual([gw.bus_recv() for _ in frames], [frame_to_can(f) for f in frames])
+        with open(os.path.join(config_dir, "lokomotive.cs2"), "rb") as fp:
+            self.assertEqual(fp.read(), content)
+        self.assertIsNone(gw.udp_recv(0.2))
+
     def test_tcp_broadcast_with_sender_hash_is_reassembled(self):
         config_dir = tempfile.mkdtemp(prefix="can2lan-broadcast-")
         self.addCleanup(shutil.rmtree, config_dir, True)

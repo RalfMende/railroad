@@ -18,6 +18,7 @@
 #include "ascii-frame.h"
 #include "read-cs2-config.h"
 #include <sys/timerfd.h>
+#include <zlib.h>
 
 static char *CAN_FORMAT_STRG     = "      CAN->   0x%08X R [%d]";
 static char *NET_UDP_FORMAT_STRG = "      UDP->   0x%08X   [%d]";
@@ -51,12 +52,12 @@ static unsigned char M_CAN_PING_CS2_3[] =
 static unsigned char M_PING_RESPONSE[] =
     { 0x00, 0x30, 0x00, 0x00, 0x00 };
 
-/* config data stream commands (GETCONFIG_DATA is also used by gio.c) */
-unsigned char GETCONFIG[]      = { 0x00, 0x40, 0xaf, 0x7e, 0x08 };
-unsigned char GETCONFIG_DATA[] = { 0x00, 0x42, 0x03, 0x00, 0x08 };
+/* config data stream commands */
+static unsigned char GETCONFIG[]      = { 0x00, 0x40, 0xaf, 0x7e, 0x08 };
+static unsigned char GETCONFIG_DATA[] = { 0x00, 0x42, 0x03, 0x00, 0x08 };
 
-/* config request name -> local config file (also used by gio.c) */
-char *cs2_configs[][2] = {
+/* config request name -> local config file */
+static char *cs2_configs[][2] = {
     { "loks", "lokomotive.cs2" },
     { "mags", "magnetartikel.cs2" },
     { "fs", "fahrstrassen.cs2" },
@@ -82,6 +83,588 @@ char *ms2_configs[] = {
 /* track pages of the local gleisbild.cs2, owned by the gateway */
 extern char **page_name;
 
+typedef int (*cs2_config_send_fn)(void *arg, int destination, unsigned char *data, int length);
+
+#define CHUNK 0x8000
+#define windowBits 15
+#define MAX_CONFIG_STREAM_SIZE (4 * 1024 * 1024)
+
+static unsigned char GETCONFIG_RESPONSE[] = { 0x00, 0x42, 0x03, 0x00, 0x06 };
+char *rmcrlf(char *s, int slen);
+void print_pages(char **page_name);
+
+#define CALL_ZLIB(x) do { \
+    int status = (x); \
+    if (status < 0) { \
+        fprintf(stderr, "%s:%d: zlib error %d\n", __FILE__, __LINE__, status); \
+        exit(EXIT_FAILURE); \
+    } \
+} while (0)
+
+static char **cs2_config_read_track_file(char *filename, char **page_name) {
+    FILE *fp;
+    int id = 0;
+    int page = 0;
+    char line[MAXLINE];
+
+    syslog(LOG_NOTICE, "%s: read %s", __func__, filename);
+
+    if ((fp = fopen(filename, "r")) != NULL) {
+	while (fgets(line, MAXLINE, fp) != NULL) {
+	    if (strstr(line, "seite") == line) {
+		page = 1;
+	    } else if (strstr(line, " .id=") == line) {
+		id = strtoul(&line[5], NULL, 0);
+	    } else if (strstr(line, " .name=") == line) {
+		rmcrlf(line, MAXLINE);
+		if (page) {
+		    page_name[id] = calloc(strlen(&line[7]) + 5, 1);
+		    if (page_name[id] == NULL) {
+			fprint_syslog_wc(stderr, LOG_ERR, "error calloc failed creating config buffer for", filename);
+			return NULL;
+		    }
+		    strcpy(page_name[id], &line[7]);
+		    strcat(page_name[id], ".cs2");
+		}
+	    }
+	}
+	fclose(fp);
+	/* EOF found, normal exit */
+	return page_name;
+    } else {
+	fprintf(stderr, "%s: error reading file %s: %s\n", __func__, filename, strerror(errno));
+	syslog(LOG_ERR, "%s: error reading file %s: %s\n", __func__, filename, strerror(errno));
+	return NULL;
+    }
+}
+
+static int cs2_config_inflate(struct cs2_config_data_t *config_data) {
+    int ret;
+    z_stream strm;
+
+    if (config_data->deflated_size < 4)
+	return Z_DATA_ERROR;
+
+    strm.zalloc = Z_NULL;
+    strm.zfree = Z_NULL;
+    strm.opaque = Z_NULL;
+    strm.avail_in = 0;
+    strm.next_in = Z_NULL;
+    ret = inflateInit(&strm);
+    if (ret != Z_OK)
+	return ret;
+    strm.avail_in = config_data->deflated_size - 4;
+    strm.avail_out = config_data->inflated_size ? config_data->inflated_size : 1;
+    strm.next_in = config_data->deflated_data + 4;
+    strm.next_out = config_data->inflated_data;
+    ret = inflate(&strm, Z_FINISH);
+    if (ret == Z_STREAM_END && strm.total_out == (unsigned int)config_data->inflated_size &&
+	strm.total_in == (unsigned int)(config_data->deflated_size - 4))
+	ret = Z_OK;
+    else if (ret >= Z_OK)
+	ret = Z_DATA_ERROR;
+    (void)inflateEnd(&strm);
+    return ret;
+}
+
+static int cs2_config_write(struct cs2_config_data_t *config_data) {
+    FILE *config_fp;
+    uint16_t crc;
+    int i, write_error = 0, saved_errno = 0;
+    size_t written;
+    char *filename;
+
+    if (config_data->name == NULL) {
+	fprintf(stderr, "\nunexpected config data stream received\n");
+	syslog(LOG_ERR, "%s: unexpected config data stream received\n", __func__);
+	free(config_data->deflated_data);
+	config_data->deflated_data = NULL;
+	free(config_data->inflated_data);
+	config_data->inflated_data = NULL;
+	return 0;
+    }
+
+    filename = calloc(MAXLINE, 1);
+    if (filename == NULL) {
+	fprint_syslog_wc(stderr, LOG_ERR, "can't calloc:", strerror(errno));
+	exit(EXIT_FAILURE);
+    }
+    strcpy(filename, config_data->dir);
+    strcat(filename, config_data->name);
+
+    crc = CRCCCITT(config_data->deflated_data, config_data->deflated_stream_size, 0xFFFF);
+
+    if (config_data->verbose)
+	printf("\n  writing to %s - size 0x%04x crc exp 0x%04x calc 0x%04x\n", config_data->name,
+	       config_data->deflated_stream_size, config_data->crc, crc);
+
+    if (crc != config_data->crc) {
+	fprintf(stderr, "\n%s: CRC mismatch for %s - expected 0x%04x calculated 0x%04x, not writing file\n",
+		__func__, config_data->name, config_data->crc, crc);
+	syslog(LOG_ERR, "%s: CRC mismatch for %s - expected 0x%04x calculated 0x%04x, not writing file\n",
+	       __func__, config_data->name, config_data->crc, crc);
+	free(filename);
+	free(config_data->deflated_data);
+	config_data->deflated_data = NULL;
+	free(config_data->inflated_data);
+	config_data->inflated_data = NULL;
+	return 0;
+    }
+
+    i = cs2_config_inflate(config_data);
+    if (config_data->verbose)
+	printf("inflate returned code %i\n", i);
+    if (i != 0) {
+	fprintf(stderr, "\n%s: inflate failed for %s - error %d, not writing file\n", __func__, config_data->name, i);
+	syslog(LOG_ERR, "%s: inflate failed for %s - error %d, not writing file\n", __func__, config_data->name, i);
+	free(filename);
+	free(config_data->deflated_data);
+	config_data->deflated_data = NULL;
+	free(config_data->inflated_data);
+	config_data->inflated_data = NULL;
+	return 0;
+    }
+
+    config_fp = fopen(filename, "wb");
+    if (!config_fp) {
+	fprintf(stderr, "\ncan't open file %s for writing - error: %s\n", filename, strerror(errno));
+	syslog(LOG_ERR, "%s: can't open file %s for writing - error: %s\n", __func__, filename, strerror(errno));
+	free(filename);
+	free(config_data->deflated_data);
+	config_data->deflated_data = NULL;
+	free(config_data->inflated_data);
+	config_data->inflated_data = NULL;
+	return 0;
+    } else if (config_data->verbose) {
+	for (i = 0; i < config_data->deflated_stream_size; i++) {
+	    if ((i % 8) == 0)
+		printf("\n");
+	    printf("%02x ", config_data->deflated_data[i]);
+	}
+	printf("\n");
+    }
+    errno = 0;
+    written = fwrite(config_data->inflated_data, 1, config_data->inflated_size, config_fp);
+    if (written != (size_t)config_data->inflated_size || ferror(config_fp)) {
+	write_error = 1;
+	saved_errno = errno ? errno : EIO;
+    }
+    if (fclose(config_fp) != 0 && !write_error) {
+	write_error = 1;
+	saved_errno = errno ? errno : EIO;
+    }
+    if (write_error) {
+	fprintf(stderr, "\n%s: can't write file %s: %s\n", __func__, filename, strerror(saved_errno));
+	syslog(LOG_ERR, "%s: can't write file %s: %s\n", __func__, filename, strerror(saved_errno));
+    }
+    free(filename);
+    free(config_data->deflated_data);
+    config_data->deflated_data = NULL;
+    free(config_data->inflated_data);
+    config_data->inflated_data = NULL;
+    return !write_error;
+}
+
+static int cs2_config_reassemble(struct cs2_config_data_t *config_data, unsigned char *netframe,
+			  cs2_config_send_fn send, void *arg) {
+    unsigned int state, temp;
+    uint16_t hash;
+    unsigned char newframe[CAN_ENCAP_SIZE];
+    char *filename;
+    char *ptr;
+
+    if (memcmp(netframe, GETCONFIG_DATA, 2) != 0)
+	return 1;
+    memcpy(&hash, &netframe[2], sizeof(hash));
+    hash = ntohs(hash);
+    if ((config_data->start || config_data->stream) && hash != config_data->stream_hash) {
+	syslog(LOG_DEBUG, "%s: ignoring config stream frame with another hash 0x%04x\n", __func__, hash);
+	return 1;
+    }
+
+    if ((memcmp(netframe, GETCONFIG_RESPONSE, 5) == 0) || netframe[4] == 7) {
+	memcpy(&temp, &netframe[5], 4);
+	temp = ntohl(temp);
+	if (temp > MAX_CONFIG_STREAM_SIZE) {
+	    syslog(LOG_ERR, "%s: abort config data stream - announced deflated size 0x%08x exceeds limit\n",
+		   __func__, temp);
+	    config_data->start = 0;
+	    config_data->stream = 0;
+	    config_data->state = CS2_STATE_INACTIVE;
+	    free(config_data->deflated_data);
+	    config_data->deflated_data = NULL;
+	    free(config_data->inflated_data);
+	    config_data->inflated_data = NULL;
+	    return 0;
+	}
+	config_data->deflated_size = temp;
+	config_data->deflated_size_counter = config_data->deflated_size;
+
+	memcpy(&temp, &netframe[9], 2);
+	config_data->crc = ntohs(temp);
+	if (config_data->verbose)
+	    printf("\nstart of config - deflated size: 0x%08x crc 0x%04x\n", config_data->deflated_size, config_data->crc);
+
+	config_data->start = 1;
+	config_data->stream = 0;
+	config_data->stream_hash = hash;
+	/* we alloc 8 bytes more to be sure that it fits */
+	config_data->deflated_data = realloc(config_data->deflated_data, config_data->deflated_size + 16);
+	if (config_data->deflated_data == NULL) {
+	    fprintf(stderr, "can't malloc deflated config data buffer - size 0x%04x\n", config_data->deflated_size + 8);
+	    exit(EXIT_FAILURE);
+	}
+	/* deflated data index */
+	config_data->ddi = 0;
+
+    } else if (netframe[4] == 8) {
+	if (config_data->start) {
+	    memcpy(&temp, &netframe[5], 4);
+	    temp = ntohl(temp);
+	    if (temp > MAX_CONFIG_STREAM_SIZE) {
+		syslog(LOG_ERR, "%s: abort config data stream - announced inflated size 0x%08x exceeds limit\n",
+		       __func__, temp);
+		config_data->start = 0;
+		config_data->stream = 0;
+		config_data->state = CS2_STATE_INACTIVE;
+		free(config_data->deflated_data);
+		config_data->deflated_data = NULL;
+		free(config_data->inflated_data);
+		config_data->inflated_data = NULL;
+		return 0;
+	    }
+	    config_data->inflated_size = temp;
+	    config_data->inflated_data = realloc(config_data->inflated_data,
+						 config_data->inflated_size ? config_data->inflated_size : 1);
+	    if (config_data->inflated_data == NULL) {
+		fprintf(stderr, "can't malloc inflated config data buffer - size 0x%04x\n", config_data->inflated_size);
+		exit(EXIT_FAILURE);
+	    }
+	    config_data->start = 0;
+	    config_data->stream = 1;
+	    memcpy(&config_data->deflated_data[0], &netframe[5], 8);
+	    config_data->ddi = 8;
+	    config_data->deflated_size_counter -= 8;
+	} else if (config_data->stream) {
+	    if (config_data->ddi + 8 > config_data->deflated_size + 16) {
+		syslog(LOG_ERR, "%s: abort config data stream - received more data than announced\n", __func__);
+		config_data->start = 0;
+		config_data->stream = 0;
+		config_data->state = CS2_STATE_INACTIVE;
+		free(config_data->deflated_data);
+		config_data->deflated_data = NULL;
+		free(config_data->inflated_data);
+		config_data->inflated_data = NULL;
+		return 0;
+	    }
+	    memcpy(&config_data->deflated_data[config_data->ddi], &netframe[5], 8);
+	    config_data->ddi += 8;
+	    if (config_data->deflated_size_counter <= 8) {
+		config_data->stream = 0;
+		config_data->deflated_stream_size = config_data->ddi;
+		if (!cs2_config_write(config_data)) {
+		    syslog(LOG_ERR, "%s: abort config copy after stream processing failed\n", __func__);
+		    config_data->state = CS2_STATE_INACTIVE;
+		    return 0;
+		}
+		/* TODO next */
+		state = config_data->state;
+		switch (state) {
+		case CS2_STATE_INACTIVE:
+		    break;
+		case CS2_STATE_NORMAL_CONFIG:
+		    if (cs2_configs[config_data->next][0]) {
+			memset(newframe, 0, CAN_ENCAP_SIZE);
+			memcpy(newframe, GETCONFIG, 5);
+			if (config_data->verbose)
+			    printf("getting %s filename %s\n", cs2_configs[config_data->next][0], cs2_configs[config_data->next][1]);
+			config_data->name = cs2_configs[config_data->next][1];
+			syslog(LOG_NOTICE, "%s: getting %s filename %s\n", __func__, cs2_configs[config_data->next][0], config_data->name);
+			memcpy(&newframe[5], cs2_configs[config_data->next][0], strlen(cs2_configs[config_data->next][0]));
+			/* print_can_frame(NET_TCP_FORMAT_STRG, newframe, 1); */
+			if (send(arg, config_data->cs2_tcp_socket, newframe, CAN_ENCAP_SIZE) < 0) {
+			    syslog(LOG_ERR, "%s: can't send next config request\n", __func__);
+			    config_data->state = CS2_STATE_INACTIVE;
+			    return 0;
+			}
+			config_data->next++;
+			break;
+		    } else {
+			/* list is done if no entry is left */
+			config_data->state = CS2_STATE_TRACK_SUM;
+		    }
+		    /* falls through */
+		case CS2_STATE_TRACK_SUM:
+		    filename = calloc(MAXLINE, 1);
+		    if (filename == NULL) {
+			fprintf(stderr, "can't calloc in %s: %s\n", __func__, strerror(errno));
+			config_data->state = CS2_STATE_INACTIVE;
+			return (EXIT_FAILURE);
+		    }
+		    strcpy(filename, config_data->dir);
+		    strcat(filename, "gleisbild.cs2");
+		    if (config_data->verbose)
+			printf("read track file %s dir %s\n", filename, config_data->dir);
+		    syslog(LOG_NOTICE, "%s: read track file %s dir %s\n", __func__, filename, config_data->dir);
+		    config_data->page_name = cs2_config_read_track_file(filename, config_data->page_name);
+		    if (config_data->page_name == NULL) {
+			fprint_syslog(stderr, LOG_ERR, "can't finish CAN member copy config request");
+			config_data->state = CS2_STATE_INACTIVE;
+			return (EXIT_FAILURE);
+		    }
+		    if (config_data->verbose)
+			printf("copy track file %s dir %s\n", filename, config_data->dir);
+		    syslog(LOG_NOTICE, "%s: track track file %s dir %s (global)\n", __func__, filename, config_data->dir);
+		    page_name = cs2_config_read_track_file(filename, config_data->page_name);
+
+		    strcat(config_data->dir, "gleisbilder/");
+		    if (config_data->verbose)
+			print_pages(config_data->page_name);
+		    free(filename);
+		    config_data->track_index = 0;
+		    config_data->state = CS2_STATE_GET_TRACKS;
+		    /* falls through */
+		case CS2_STATE_GET_TRACKS:
+		    if (config_data->page_name[config_data->track_index]) {
+			memset(newframe, 0, CAN_ENCAP_SIZE);
+			memcpy(newframe, GETCONFIG, 5);
+			config_data->name = config_data->page_name[config_data->track_index];
+			sprintf((char *)&newframe[5], "gbs-%d", config_data->track_index);
+			if (config_data->verbose)
+			    printf("getting track %s filename %s\n", &newframe[5], config_data->name);
+			syslog(LOG_NOTICE, "%s: getting track %s filename %s\n", __func__, &newframe[5], config_data->name);
+			if (send(arg, config_data->cs2_tcp_socket, newframe, CAN_ENCAP_SIZE) < 0) {
+			    syslog(LOG_ERR, "%s: can't send track config request\n", __func__);
+			    config_data->state = CS2_STATE_INACTIVE;
+			    return 0;
+			}
+			config_data->track_index++;
+		    } else {
+			/* reset dir */
+			ptr = strstr(config_data->dir, "gleisbilder/");
+			if (ptr)
+			    *ptr = 0;
+			config_data->state = CS2_STATE_INACTIVE;
+		    }
+		    break;
+		case CS2_STATE_BROADCAST_UPDATE:
+		default:
+		    config_data->state = CS2_STATE_INACTIVE;
+		    break;
+		}
+	    } else {
+		config_data->deflated_size_counter -= 8;
+	    }
+	}
+    } else if ((config_data->start || config_data->stream) &&
+	       (netframe[4] != 6) && (netframe[4] != 7) && (netframe[4] != 8)) {
+	/* spec: only DLC 6/7 (stream start) and 8 (data) are valid - any other
+	   DLC within a config data stream aborts the reception */
+	syslog(LOG_ERR, "%s: abort config data stream - unexpected DLC %d\n", __func__, netframe[4]);
+	config_data->start = 0;
+	config_data->stream = 0;
+	config_data->state = CS2_STATE_INACTIVE;
+	free(config_data->deflated_data);
+	config_data->deflated_data = NULL;
+	free(config_data->inflated_data);
+	config_data->inflated_data = NULL;
+	return 0;
+    }
+    return 1;
+}
+
+static uint8_t *cs2_config_read_file(char *filename, char *config_dir, uint32_t * nbytes) {
+    int rc;
+    struct stat st;
+    FILE *fp;
+    uint8_t *config;
+    char *file_name;
+
+    file_name = calloc(MAXLINE, 1);
+    if (!file_name)
+	return NULL;
+
+    strncat(file_name, config_dir, MAXLINE - 1);
+    strcat(file_name, filename);
+
+    /* printf("%s: try reading file %s\n", __func__, file_name); */
+
+    rc = stat(file_name, &st);
+    if (rc < 0) {
+	fprintf(stderr, "%s: error stat failed for file %s\n", __func__, filename);
+	syslog(LOG_ERR, "%s: error stat failed for file %s\n", __func__, filename);
+	goto read_error1;
+    }
+    fp = fopen(file_name, "rb");
+    if (fp == NULL) {
+	fprintf(stderr, "%s: error fopen failed for file %s\n", __func__, filename);
+	syslog(LOG_ERR, "%s: error fopen failed for file %s\n", __func__, filename);
+	goto read_error1;
+    }
+    *nbytes = st.st_size;
+    config = (uint8_t *) calloc(*nbytes, 1);
+    if (config == NULL) {
+	fprintf(stderr, "%s: error calloc failed creating config buffer for %s\n", __func__, filename);
+	syslog(LOG_ERR, "%s: error calloc failed creating config buffer for %s\n", __func__, filename);
+	goto read_error2;
+    }
+    rc = fread((void *)config, 1, *nbytes, fp);
+    if (((unsigned int)rc != *nbytes)) {
+	fprintf(stderr, "%s: error fread failed reading %s\n", __func__, filename);
+	syslog(LOG_ERR, "%s: error fread failed reading %s\n", __func__, filename);
+	free(config);
+	goto read_error2;
+    }
+    fclose(fp);
+    free(file_name);
+    return config;
+
+read_error2:
+    fclose(fp);
+read_error1:
+    free(file_name);
+    return NULL;
+}
+
+static void strm_init(z_stream * strm) {
+    strm->zalloc = Z_NULL;
+    strm->zfree = Z_NULL;
+    strm->opaque = Z_NULL;
+    CALL_ZLIB(deflateInit2(strm, Z_DEFAULT_COMPRESSION, Z_DEFLATED, windowBits, 8, Z_DEFAULT_STRATEGY));
+}
+
+static int cs2_config_send_stream(char *filename, char *config_dir, uint32_t canid,
+			   int *socket_list, int socket_nmbr, int flags, uint8_t fill,
+			   int packets_per_write, cs2_config_send_fn send, void *arg) {
+    uint32_t temp32, canid_be, nbytes = 0;
+    uint8_t *config;
+    uint8_t *out;
+    z_stream strm;
+    int inflated_size, deflated_size, padded_nbytes, i, src_i, n_packets;
+    uint16_t crc, temp16;
+    uint8_t netframe[MAXMTU];
+    int rc = 0;
+
+    config = cs2_config_read_file(filename, config_dir, &nbytes);
+    if (config == NULL) {
+	fprintf(stderr, "%s: error reading config %s\n", __func__, filename);
+	syslog(LOG_ERR, "%s: error reading config %s\n", __func__, filename);
+	return -1;
+    }
+
+    if (flags & COMPRESSED) {
+	/* we need some more bytes to prepare send data (includes inflated file size and padding)    */
+	/* assuming that out[CHUNK] is large enough to compress the whole file, otherwise don't send */
+	out = (uint8_t *) calloc(CHUNK + 12, 1);
+	if (out == NULL) {
+	    fprintf(stderr, "%s: error calloc failed creating deflation buffer\n", __func__);
+	    syslog(LOG_ERR, "%s: error calloc failed creating deflation buffer\n", __func__);
+	    free(config);
+	    return -1;
+	}
+	strm_init(&strm);
+	strm.next_in = config;
+	strm.avail_in = nbytes;
+	strm.avail_out = CHUNK;
+	/* store deflated file beginning at byte 5 */
+	strm.next_out = &out[4];
+	i = deflate(&strm, Z_FINISH);
+	deflated_size = CHUNK - strm.avail_out;
+	deflateEnd(&strm);
+	free(config);
+	if (i != Z_STREAM_END) {
+	    fprintf(stderr, "%s: bad status %d when compressing file %s\n", __func__, i, filename);
+	    syslog(LOG_ERR, "%s: bad status %d when compressing file %s\n", __func__, i, filename);
+	    free(out);
+	    return -1;
+	}
+
+	/* now prepare the send buffer */
+	inflated_size = htonl(nbytes);
+	memcpy(out, &inflated_size, 4);
+	/* prepare padding */
+	padded_nbytes = deflated_size + 4;
+	if (padded_nbytes % 8) {
+	    padded_nbytes += 8 - (padded_nbytes % 8);
+	}
+
+	for (i = deflated_size + 4; i < padded_nbytes; i++) {
+	    out[i] = 0;
+	}
+
+	crc = CRCCCITT(out, padded_nbytes, 0xffff);
+	/* printf("%s: canid 0x%08x filesize %d deflated size: %d crc 0x%04x\n", __func__, canid, nbytes, deflated_size, crc); */
+	memset(netframe, 0, MAXMTU);
+	/* prepare first CAN frame   */
+	/* delete response bit and set canid to config data stream */
+	canid_be = htonl((canid & 0xFFFEFFFFUL) | 0x00020000UL);
+
+	// repeat from here in case of broadcast
+	for (int sn = 0; sn < socket_nmbr; sn++) {	/* check all clients for data */
+	    if (socket_list[sn] < 0)
+		continue;
+
+	    memcpy(&netframe[0], &canid_be, 4);
+	    /* CAN DLC is 6 */
+	    netframe[4] = 0x06;
+	    temp32 = htonl(deflated_size + 4);
+	    memcpy(&netframe[5], &temp32, 4);
+	    temp16 = htons(crc);
+	    memcpy(&netframe[9], &temp16, 2);
+	    netframe[11] = 0x00;
+	    netframe[12] = 0x00;
+	    if (flags & BCCHANGE) {
+		netframe[4] = 0x07;
+		netframe[11] = fill;
+	    }
+	    /* TCP frames are queued; UDP frames are sent individually. */
+	    if (send(arg, socket_list[sn], netframe, CAN_ENCAP_SIZE)) {
+		syslog(LOG_ERR, "%s: can't send config stream header for fd %d\n", __func__, socket_list[sn]);
+		rc = -1;
+		continue;
+	    }
+
+	    /* loop until all packets are queued */
+	    src_i = 0;
+	    do {
+		n_packets = 0;
+		i = 0;
+		do {
+		    memcpy(&netframe[i], &canid_be, 4);
+		    i += 4;
+		    /* CAN DLC is always 8 */
+		    netframe[i] = 0x08;
+		    i++;
+		    memcpy(&netframe[i], &out[src_i], 8);
+		    i += 8;
+		    src_i += 8;
+		    n_packets++;
+		} while ((src_i < padded_nbytes) && (n_packets < packets_per_write));
+
+		if (send(arg, socket_list[sn], netframe, i)) {
+		    syslog(LOG_ERR, "%s: can't send config stream data for fd %d\n", __func__, socket_list[sn]);
+		    rc = -1;
+		    break;
+		}
+	    } while (src_i < padded_nbytes);
+#if 0
+	    /* print compressed data */
+	    temp32 = i;
+	    for (i = 0; i < temp32; i++) {
+		if ((i % CAN_ENCAP_SIZE) == 0) {
+		    printf("\n");
+		}
+		printf("%02x ", netframe[i]);
+	    }
+	    printf("\n");
+#endif
+	}
+	free(out);
+    }
+    return rc;
+}
+
+
 /*
  * Initialize the core context, load local CS2 config data and store the
  * gateway I/O callbacks. The context must be zero-initialized by the
@@ -100,6 +683,7 @@ int cs2_core_init(struct cs2_core_t *core, const struct cs2_core_io *io, char *c
     struct itimerspec timer = { { PING_TIME, 0 }, { PING_TIME, 0 } };
 
     core->io = *io;
+    core->config_dir = config_dir;
     core->event_fd = -1;
     core->cfg.state = CS2_STATE_INACTIVE;
     core->cfg.track_index = MAX_TRACK_PAGE;
@@ -141,7 +725,7 @@ int cs2_core_init(struct cs2_core_t *core, const struct cs2_core_io *io, char *c
 	return -1;
     }
     core->cfg.dir = config_dir;
-    page_name = read_track_file(track_file, page_name);
+    page_name = cs2_config_read_track_file(track_file, page_name);
     if (read_loco_data(loco_file, CONFIG_FILE) != 0)
 	syslog(LOG_WARNING, "%s: can't read loco data from %s\n", __func__, loco_file);
     if (cs2_core_send_start_frames(core) < 0)
@@ -284,7 +868,7 @@ int cs2_core_answer_ping(struct cs2_core_t *core) {
 /*
  * Start cloning the config from a connected CAN member: request the first
  * config file (lokomotive.cs2) via its TCP connection; the answer is
- * received as config data stream by reassemble_data() (gio.c), which then
+ * received as config data stream by the core, which then
  * walks through the remaining cs2_configs entries. Does nothing if no CAN
  * member TCP connection is known yet.
  */
@@ -340,12 +924,25 @@ void cs2_core_handle_can_frame(struct cs2_core_t *core, struct can_frame *frame)
     cs2_core_handle_frame(core, CS2_SRC_CAN, -1, netframe);
 }
 
+static int cs2_core_tcp_config_frame(void *arg, int socket, unsigned char *data, int length) {
+    struct cs2_core_t *core = arg;
+    return core->io.tcp_send(core->io.arg, socket, data, length);
+}
+
+static int cs2_core_udp_config_frame(void *arg, int socket, unsigned char *data, int length) {
+    struct cs2_core_t *core = arg;
+    (void)socket;
+    return core->io.udp_send(core->io.arg, data, length);
+}
+
 static void cs2_core_send_config(struct cs2_core_t *core, int tcp_socket,
 				 char *name, uint32_t canid, int udp_ready, int tcp_ready) {
-    if (udp_ready && core->io.udp_config_send(core->io.arg, name, canid) < 0)
+    int udp_destination = 0;
+    if (udp_ready && cs2_config_send_stream(name, core->config_dir, canid, &udp_destination, 1,
+					    CRC | COMPRESSED, 0, 1, cs2_core_udp_config_frame, core) < 0)
 	syslog(LOG_ERR, "%s: failed to send UDP config stream for %s\n", __func__, name);
-    if (tcp_ready && core->io.tcp_config_send(core->io.arg, name, canid, &tcp_socket, 1,
-					      CRC | COMPRESSED, 0) < 0)
+    if (tcp_ready && cs2_config_send_stream(name, core->config_dir, canid, &tcp_socket, 1,
+					    CRC | COMPRESSED, 0, MAX_PACKETS, cs2_core_tcp_config_frame, core) < 0)
 	syslog(LOG_ERR, "%s: failed to send TCP config stream for %s\n", __func__, name);
 }
 
@@ -354,7 +951,7 @@ static void cs2_core_send_config(struct cs2_core_t *core, int tcp_socket,
  * arrived via UDP, TCP or the CAN bus: answer CAN member pings (in slave
  * mode, faked as CS2), serve config file requests (loks/mags/gbs/fs and the
  * *stat files) from the local config directory, feed config data streams to
- * reassemble_data() (gio.c), distribute config change broadcasts and apply
+ * the core's stream receiver, distribute config change broadcasts and apply
  * the MS1 workaround. Config answers go to UDP and, for TCP requests, also
  * to the sending TCP client. The frame may be modified in place (e.g. MS1 workaround).
  * Forwarding the frame is the gateway's job - every frame is
@@ -377,10 +974,16 @@ void cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, in
     if (src == CS2_SRC_CAN) {
 	if (((canid & 0x1FFFF00UL) == 0x0434700UL) && (netframe[4] == 8)) {
 	    uint8_t fill = canid & 0xFF;
+	    int *clients;
+	    int count;
 	    strncpy(config_name, (char *)&netframe[5], 8);
 	    config_name[8] = '\0';
 	    syslog(LOG_NOTICE, "%s: config request >%s<\n", __func__, config_name);
-	    core->io.tcp_config_send_all(core->io.arg, config_name, canid, CRC | COMPRESSED | BCCHANGE, fill);
+	    count = core->io.tcp_clients(core->io.arg, &clients);
+	    if (cs2_config_send_stream(config_name, core->config_dir, canid, clients, count,
+				       CRC | COMPRESSED | BCCHANGE, fill, MAX_PACKETS,
+				       cs2_core_tcp_config_frame, core) < 0)
+		syslog(LOG_ERR, "%s: failed to send config change stream for %s\n", __func__, config_name);
 	    return;
 	}
 	/* slave mode: answer CAN member pings from the bus */
@@ -573,7 +1176,7 @@ void cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, in
 		core->cfg.state = CS2_STATE_BROADCAST_UPDATE;
 	    }
 	    /* check for initiated copy request or brodcast update */
-	    reassemble_data(&core->cfg, netframe);
+	    cs2_config_reassemble(&core->cfg, netframe, cs2_core_tcp_config_frame, core);
 	    print_can_frame(NET_TCP_FORMAT_STRG, netframe, core->cfg.verbose);
 	}
 	break;

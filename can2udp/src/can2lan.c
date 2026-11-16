@@ -141,19 +141,10 @@ static int gw_can_enqueue(void *arg, unsigned char *frame) {
     return can_tx_enqueue(frame);
 }
 
-static int gw_udp_config_send(void *arg, char *name, uint32_t canid) {
+static int gw_tcp_clients(void *arg, int **clients) {
     struct gw_io_ctx *io = (struct gw_io_ctx *)arg;
-    return send_udp_config_data(name, config_dir, canid, io->udp_socket, io->udp_baddr);
-}
-
-static int gw_tcp_config_send(void *arg, char *name, uint32_t canid, int *tcp_socket_list, int socket_nmbr, int flags, uint8_t fill) {
-    (void)arg;
-    return send_tcp_config_data(name, config_dir, canid, tcp_socket_list, socket_nmbr, flags, fill);
-}
-
-static int gw_tcp_config_send_all(void *arg, char *name, uint32_t canid, int flags, uint8_t fill) {
-    struct gw_io_ctx *io = (struct gw_io_ctx *)arg;
-    return send_tcp_config_data(name, config_dir, canid, io->tcp_clients, *io->tcp_client_max + 1, flags, fill);
+    *clients = io->tcp_clients;
+    return *io->tcp_client_max + 1;
 }
 
 void signal_handler(int sig) {
@@ -237,9 +228,7 @@ int main(int argc, char **argv) {
     core_io.tcp_send_all = gw_tcp_send_all;
     core_io.can_send = gw_can_send;
     core_io.can_enqueue = gw_can_enqueue;
-    core_io.udp_config_send = gw_udp_config_send;
-    core_io.tcp_config_send = gw_tcp_config_send;
-    core_io.tcp_config_send_all = gw_tcp_config_send_all;
+    core_io.tcp_clients = gw_tcp_clients;
 
     memset(ifr.ifr_name, 0, sizeof(ifr.ifr_name));
     strcpy(ifr.ifr_name, "can0");

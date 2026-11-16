@@ -38,13 +38,8 @@ struct cs2_core_io {
     int (*can_send)(void *arg, unsigned char *frame);
     /* queue a 13-byte CAN frame for the CAN bus (non-blocking, paced by the gateway's main loop) */
     int (*can_enqueue)(void *arg, unsigned char *frame);
-    /* send a config file as individual UDP config data frames */
-    int (*udp_config_send)(void *arg, char *name, uint32_t canid);
-    /* send a config file as (compressed) config data stream to TCP clients */
-    int (*tcp_config_send)(void *arg, char *name, uint32_t canid, int *tcp_socket_list, int socket_nmbr, int flags,
-			   uint8_t fill);
-    /* send a config file as (compressed) config data stream to all connected TCP clients */
-    int (*tcp_config_send_all)(void *arg, char *name, uint32_t canid, int flags, uint8_t fill);
+    /* provide connected primary TCP client descriptors */
+    int (*tcp_clients)(void *arg, int **clients);
 };
 
 /* where a frame was received from / where replies are routed to */
@@ -57,16 +52,11 @@ enum cs2_core_source {
 struct cs2_core_t {
     struct cs2_config_data_t cfg;	/* config clone/stream state */
     struct cs2_core_io io;
+    char *config_dir;
     int slave;				/* -S: slave mode - answer CAN member pings, don't send them */
     int ms1_workaround;			/* -m: fake cyclic MS1 slave monitoring response */
     int event_fd;			/* core event descriptor, -1 if none */
 };
-
-/* shared with the gateway (can2lan.c) and gio.c */
-extern unsigned char M_CAN_MEMBER_PING[];
-extern unsigned char GETCONFIG[];
-extern unsigned char GETCONFIG_DATA[];
-extern char *cs2_configs[][2];
 
 /* initialize the core context and local CS2 config data; call after parsing options and preparing gateway I/O.
    config_dir is normalized in place. The context must be zero-initialized by the caller. In master mode the
