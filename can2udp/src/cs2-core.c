@@ -340,16 +340,13 @@ void cs2_core_handle_can_frame(struct cs2_core_t *core, struct can_frame *frame)
     cs2_core_handle_frame(core, CS2_SRC_CAN, -1, netframe);
 }
 
-static void cs2_core_send_config(struct cs2_core_t *core, enum cs2_core_source src,
-				 int tcp_socket, char *name, uint32_t canid) {
-    int ret;
-
-    if (src == CS2_SRC_UDP)
-	ret = core->io.udp_config_send(core->io.arg, name, canid);
-    else
-	ret = core->io.tcp_config_send(core->io.arg, name, canid, &tcp_socket, 1, CRC | COMPRESSED, 0);
-    if (ret < 0)
-	syslog(LOG_ERR, "%s: failed to send config stream for %s\n", __func__, name);
+static void cs2_core_send_config(struct cs2_core_t *core, int tcp_socket,
+				 char *name, uint32_t canid, int udp_ready, int tcp_ready) {
+    if (udp_ready && core->io.udp_config_send(core->io.arg, name, canid) < 0)
+	syslog(LOG_ERR, "%s: failed to send UDP config stream for %s\n", __func__, name);
+    if (tcp_ready && core->io.tcp_config_send(core->io.arg, name, canid, &tcp_socket, 1,
+					      CRC | COMPRESSED, 0) < 0)
+	syslog(LOG_ERR, "%s: failed to send TCP config stream for %s\n", __func__, name);
 }
 
 /*
@@ -358,9 +355,8 @@ static void cs2_core_send_config(struct cs2_core_t *core, enum cs2_core_source s
  * mode, faked as CS2), serve config file requests (loks/mags/gbs/fs and the
  * *stat files) from the local config directory, feed config data streams to
  * reassemble_data() (gio.c), distribute config change broadcasts and apply
- * the MS1 workaround. Answers are routed to the UDP broadcast destination
- * (src = CS2_SRC_UDP) or back to the sending TCP client (src = CS2_SRC_TCP,
- * tcp_socket). The frame may be modified in place (e.g. MS1 workaround).
+ * the MS1 workaround. Config answers go to UDP and, for TCP requests, also
+ * to the sending TCP client. The frame may be modified in place (e.g. MS1 workaround).
  * Forwarding the frame is the gateway's job - every frame is
  * forwarded, regardless of what is answered here.
  */
@@ -369,6 +365,7 @@ void cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, in
     unsigned char reply[CAN_ENCAP_SIZE];
     char config_name[9];
     char gbs_name[MAXLINE];
+    int udp_ready, tcp_ready;
 
     gbs_name[0] = '\0';
 
@@ -456,6 +453,10 @@ void cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, in
     case (0x00400000UL):	/* config data */
 	if (src == CS2_SRC_TCP && core->slave)
 	    break;
+	if (netframe[4] != 8) {
+	    syslog(LOG_WARNING, "%s: ignoring config request with DLC %u\n", __func__, netframe[4]);
+	    break;
+	}
 	if (src == CS2_SRC_UDP) {
 	    /* check for initiated config request */
 	    if (canid == 0x0040af7e) {
@@ -468,10 +469,6 @@ void cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, in
 	    }
 	    if (core->slave)
 		break;
-	    if (netframe[4] != 8) {
-		syslog(LOG_WARNING, "%s: ignoring UDP config request with DLC %u\n", __func__, netframe[4]);
-		break;
-	    }
 	}
 	memcpy(reply, netframe, CAN_ENCAP_SIZE);
 	reply[1] |= 1;
@@ -481,6 +478,8 @@ void cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, in
 	    strcpy((char *)&reply[5], "copy");
 	    if (core->io.tcp_send(core->io.arg, tcp_socket, reply, CAN_ENCAP_SIZE) < 0)
 		syslog(LOG_ERR, "%s: failed to send TCP copy acknowledgement\n", __func__);
+	    if (core->io.udp_send(core->io.arg, reply, CAN_ENCAP_SIZE) < 0)
+		syslog(LOG_ERR, "%s: failed to send UDP copy acknowledgement\n", __func__);
 	    if (core->cfg.verbose)
 		printf("CAN member copy request\n");
 	    syslog(LOG_NOTICE, "%s: CAN member copy request\n", __func__);
@@ -491,22 +490,22 @@ void cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, in
 	    syslog(LOG_NOTICE, "%s: config request >%s<\n", __func__, config_name);
 	    if (core->cfg.verbose)
 		printf("%s ID 0x%08x %s\n", __func__, canid, config_name);
-	    if (src == CS2_SRC_UDP) {
-		if (core->io.udp_send(core->io.arg, reply, CAN_ENCAP_SIZE) < 0) {
-		    syslog(LOG_ERR, "%s: failed to send UDP config acknowledgement\n", __func__);
-		    break;
-		}
-	    } else {
-		if (core->io.tcp_send(core->io.arg, tcp_socket, reply, CAN_ENCAP_SIZE) < 0)
+	    udp_ready = core->io.udp_send(core->io.arg, reply, CAN_ENCAP_SIZE) >= 0;
+	    if (!udp_ready)
+		syslog(LOG_ERR, "%s: failed to send UDP config acknowledgement\n", __func__);
+	    tcp_ready = 0;
+	    if (src == CS2_SRC_TCP) {
+		tcp_ready = core->io.tcp_send(core->io.arg, tcp_socket, reply, CAN_ENCAP_SIZE) >= 0;
+		if (!tcp_ready)
 		    syslog(LOG_ERR, "%s: failed to send TCP config acknowledgement\n", __func__);
 	    }
 	    if (strcmp("loks", config_name) == 0) {
 		syslog(LOG_NOTICE, "%s: sending lokomotive.cs2\n", __func__);
-		cs2_core_send_config(core, src, tcp_socket, "lokomotive.cs2", canid);
+		cs2_core_send_config(core, tcp_socket, "lokomotive.cs2", canid, udp_ready, tcp_ready);
 		break;
 	    } else if (strcmp("mags", config_name) == 0) {
 		syslog(LOG_NOTICE, "%s: sending magnetartikel.cs2\n", __func__);
-		cs2_core_send_config(core, src, tcp_socket, "magnetartikel.cs2", canid);
+		cs2_core_send_config(core, tcp_socket, "magnetartikel.cs2", canid, udp_ready, tcp_ready);
 		break;
 	    } else if (strncmp("gbs-", config_name, 4) == 0) {
 		char *end;
@@ -519,40 +518,40 @@ void cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, in
 			break;
 		    }
 		    syslog(LOG_NOTICE, "%s: sending %s\n", __func__, gbs_name);
-		    cs2_core_send_config(core, src, tcp_socket, gbs_name, canid);
+		    cs2_core_send_config(core, tcp_socket, gbs_name, canid, udp_ready, tcp_ready);
 		    break;
 		}
 		syslog(LOG_NOTICE, "%s: can't send config page %s\n", __func__, config_name);
 		break;
 	    } else if (strcmp("gbs", config_name) == 0) {
 		syslog(LOG_NOTICE, "%s: sending gleisbild.cs2\n", __func__);
-		cs2_core_send_config(core, src, tcp_socket, "gleisbild.cs2", canid);
+		cs2_core_send_config(core, tcp_socket, "gleisbild.cs2", canid, udp_ready, tcp_ready);
 		break;
 	    } else if (strcmp("fs", config_name) == 0) {
 		syslog(LOG_NOTICE, "%s: sending fahrstrassen.cs2\n", __func__);
-		cs2_core_send_config(core, src, tcp_socket, "fahrstrassen.cs2", canid);
+		cs2_core_send_config(core, tcp_socket, "fahrstrassen.cs2", canid, udp_ready, tcp_ready);
 		break;
 	    }
 	    /* TODO : these files depends on different internal states */
 	    else if (strcmp("lokstat", config_name) == 0) {
 		/* fprintf(stderr, "%s: lokstat (lokomotive.sr2) not implemented yet\n", __func__); */
 		syslog(LOG_NOTICE, "%s: sending lokomotive.sr2\n", __func__);
-		cs2_core_send_config(core, src, tcp_socket, "lokomotive.sr2", canid);
+		cs2_core_send_config(core, tcp_socket, "lokomotive.sr2", canid, udp_ready, tcp_ready);
 		break;
 	    } else if (strcmp("magstat", config_name) == 0) {
 		/* fprintf(stderr, "%s: magstat (magnetartikel.sr2) not implemented yet\n\n", __func__); */
 		syslog(LOG_NOTICE, "%s: sending magnetartikel.sr2\n", __func__);
-		cs2_core_send_config(core, src, tcp_socket, "magnetartikel.sr2", canid);
+		cs2_core_send_config(core, tcp_socket, "magnetartikel.sr2", canid, udp_ready, tcp_ready);
 		break;
 	    } else if (strcmp("gbsstat", config_name) == 0) {
 		/* fprintf(stderr, "%s: gbsstat (gleisbild.sr2) not implemented yet\n\n", __func__); */
 		syslog(LOG_NOTICE, "%s: sending gleisbild.sr2\n", __func__);
-		cs2_core_send_config(core, src, tcp_socket, "gleisbild.sr2", canid);
+		cs2_core_send_config(core, tcp_socket, "gleisbild.sr2", canid, udp_ready, tcp_ready);
 		break;
 	    } else if (strcmp("fsstat", config_name) == 0) {
 		/* fprintf(stderr, "%s: fsstat (fahrstrassen.sr2) not implemented yet\n\n", __func__); */
 		syslog(LOG_NOTICE, "%s: sending fahrstrassen.sr2\n", __func__);
-		cs2_core_send_config(core, src, tcp_socket, "fahrstrassen.sr2", canid);
+		cs2_core_send_config(core, tcp_socket, "fahrstrassen.sr2", canid, udp_ready, tcp_ready);
 		break;
 	    }
 	    break;

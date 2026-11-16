@@ -186,6 +186,8 @@ def check_data(frame):
     canid = int.from_bytes(frame[0:4], "big")
     cmd = canid & 0xFFFF0000
     if cmd == 0x00400000:
+        if frame[4] != 8:
+            return False, bytes(out)
         if canid == 0x0040AF7E:
             return True, bytes(out)
         name = bytes(frame[5:13]).split(b"\x00")[0]

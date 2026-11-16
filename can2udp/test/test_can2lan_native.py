@@ -1282,6 +1282,21 @@ class TestNativeGateway(unittest.TestCase):
         self.assertEqual(self.gw.bus_recv(), frame_to_can(request))
         self.assertIsNone(self.gw.udp_recv(0.2))
 
+    def test_invalid_config_request_dlc_is_not_answered(self):
+        client = self.gw.connect()
+        for canid in (0x00401234, 0x0040AF7E):
+            for dlc in (0, 7, 9, 255):
+                with self.subTest(canid=canid, dlc=dlc):
+                    request = canid.to_bytes(4, "big") + bytes([dlc]) + b"loks\0\0\0\0"
+                    client.sendall(request)
+                    self.assertEqual(self.gw.bus_recv(), frame_to_can(request))
+                    self.gw.udp_send(request)
+                    self.assertEqual(self.gw.bus_recv(), frame_to_can(request))
+        self.assertIsNone(self.gw.udp_recv(0.2))
+        client.settimeout(0.2)
+        with self.assertRaises(socket.timeout):
+            client.recv(1)
+
     def test_tcp_track_page_request_is_answered_with_a_stream(self):
         client = self.gw.connect()
         request = bytes([0x00, 0x40, 0x12, 0x34, 0x08]) + b"gbs-0\0\0\0"
@@ -1290,9 +1305,12 @@ class TestNativeGateway(unittest.TestCase):
         with open(os.path.join(CONFIG_DIR, "gleisbilder", "karben.cs2"), "rb") as fp:
             expected = model_config_stream(fp.read(), 0x00401234)
         self.assertEqual(split_frames(recv_exact(client, len(expected) * 13)), expected)
+        self.assertEqual(self.gw.udp_recv(), bytes([0x00, 0x41]) + request[2:])
+        self.assertEqual([self.gw.udp_recv() for _ in expected], expected)
 
     def test_config_request_is_answered_with_a_stream(self):
         client = self.gw.connect()
+        other_client = self.gw.connect()
         request = bytes([0x00, 0x40, 0x12, 0x34, 0x08]) + b"loks\0\0\0\0"
         client.sendall(request)
         ack = recv_exact(client, 13)
@@ -1303,7 +1321,13 @@ class TestNativeGateway(unittest.TestCase):
         got = split_frames(recv_exact(client, len(expected) * 13, timeout=10))
         self.assertEqual(got, expected)
         self.assertEqual(self.gw.bus_recv(), frame_to_can(request))
+        self.assertEqual(self.gw.udp_recv(), ack)
+        self.assertEqual([self.gw.udp_recv() for _ in expected], expected)
         self.assertIsNone(self.gw.udp_recv(0.2))
+        self.assertIsNone(self.gw.bus_recv(0.2))
+        other_client.settimeout(0.2)
+        with self.assertRaises(socket.timeout):
+            other_client.recv(1)
 
     def test_tcp_unknown_config_request_is_forwarded_unchanged(self):
         client = self.gw.connect()
@@ -1311,6 +1335,7 @@ class TestNativeGateway(unittest.TestCase):
         client.sendall(request)
         self.assertEqual(recv_exact(client, 13), bytes([0x00, 0x41]) + request[2:])
         self.assertEqual(self.gw.bus_recv(), frame_to_can(request))
+        self.assertEqual(self.gw.udp_recv(), bytes([0x00, 0x41]) + request[2:])
         self.assertIsNone(self.gw.udp_recv(0.2))
 
     def test_tcp_copy_request_is_forwarded_unchanged(self):
@@ -1320,6 +1345,8 @@ class TestNativeGateway(unittest.TestCase):
         self.assertEqual(recv_exact(client, 13),
                          bytes([0x00, 0x41, 0xAF, 0x7E, 0x04]) + b"copy\0\0\0\0")
         self.assertEqual(self.gw.bus_recv(), frame_to_can(request))
+        self.assertEqual(self.gw.udp_recv(),
+                         bytes([0x00, 0x41, 0xAF, 0x7E, 0x04]) + b"copy\0\0\0\0")
         self.assertIsNone(self.gw.udp_recv(0.2))
 
     def test_invalid_page_request_is_survived(self):
