@@ -149,6 +149,13 @@ def load_lib():
                                      c_int, c_int, ctypes.c_uint8], c_int),
         ("test_config_reassemble", [ctypes.POINTER(ConfigData), c_char_p], c_int),
         ("test_core_send_start_frames", [c_int, c_int, c_int], c_int),
+        ("test_loco_create", [c_char_p, c_int], c_void_p),
+        ("test_loco_destroy", [c_void_p], None),
+        ("test_loco_count", [c_void_p], ctypes.c_size_t),
+        ("test_loco_name", [c_void_p, ctypes.c_size_t], c_char_p),
+        ("test_loco_velocity", [c_void_p, ctypes.c_size_t], ctypes.c_uint),
+        ("test_loco_direction", [c_void_p, ctypes.c_size_t], ctypes.c_uint),
+        ("test_loco_handle_can", [c_void_p, c_char_p], None),
     ]:
         func = getattr(LIB, name)
         func.argtypes = argtypes
@@ -180,6 +187,83 @@ class TestNativeCoreStart(LibTestCase):
             self.assertEqual(LIB.test_core_send_start_frames(can.fileno(), -1, tcp.fileno()), -1)
         self.assertEqual(recv_exact(can_peer, 13), M_GLEISBOX_ALL_PROTO_ENABLE)
         self.assertEqual(recv_exact(tcp_peer, 13), M_GLEISBOX_ALL_PROTO_ENABLE)
+
+
+class TestNativeLocoState(LibTestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="can2lan-locos-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        with open(os.path.join(self.dir, "gleisbild.cs2"), "w") as fp:
+            fp.write("[gleisbild]\n")
+        with open(os.path.join(self.dir, "lokomotive.cs2"), "w") as fp:
+            fp.write("[lokomotive]\nlokomotive\n .name=Zug B\n .uid=0x4001\n"
+                     " .velocity=999\n .richtung=2\n"
+                     "lokomotive\n .name=Zug A\n .uid=0x4002\n"
+                     " .velocity=100\n .richtung=2\n")
+
+    def test_initial_state_and_confirmed_can_updates(self):
+        for slave in (0, 1):
+            with self.subTest(slave=slave):
+                core = LIB.test_loco_create(os.fsencode(self.dir), slave)
+                self.assertTrue(core)
+                try:
+                    self.assertEqual(LIB.test_loco_count(core), 2)
+                    self.assertEqual([LIB.test_loco_name(core, i) for i in range(2)], [b"Zug B", b"Zug A"])
+                    self.assertEqual([LIB.test_loco_velocity(core, i) for i in range(2)], [0, 0])
+                    self.assertEqual([LIB.test_loco_direction(core, i) for i in range(2)], [1, 1])
+                    # Requests do not update state; only the confirmed response does.
+                    LIB.test_loco_handle_can(core, bytes.fromhex("00080300060000400103200000"))
+                    self.assertEqual(LIB.test_loco_velocity(core, 0), 0)
+                    LIB.test_loco_handle_can(core, bytes.fromhex("00090300060000400103200000"))
+                    self.assertEqual(LIB.test_loco_velocity(core, 0), 800)
+                    for invalid in ("00090300050000400101000000",
+                                    "00090300060000409901000000",
+                                    "00090300060000400104000000",
+                                    "000b0300050000400104000000"):
+                        LIB.test_loco_handle_can(core, bytes.fromhex(invalid))
+                    self.assertEqual(LIB.test_loco_velocity(core, 0), 800)
+                    self.assertEqual(LIB.test_loco_direction(core, 0), 1)
+                    LIB.test_loco_handle_can(core, bytes.fromhex("000b0300050000400102000000"))
+                    self.assertEqual(LIB.test_loco_direction(core, 0), 2)
+                    self.assertEqual(LIB.test_loco_velocity(core, 0), 0)
+                    self.assertEqual(LIB.test_loco_velocity(core, 1), 0)
+                    self.assertEqual(LIB.test_loco_direction(core, 1), 1)
+                    LIB.test_loco_handle_can(core, bytes.fromhex("00090300060000400103200000"))
+                    LIB.test_loco_handle_can(core, bytes.fromhex("000b0300050000400100000000"))
+                    self.assertEqual(LIB.test_loco_velocity(core, 0), 800)
+                    self.assertEqual(LIB.test_loco_direction(core, 0), 2)
+                    LIB.test_loco_handle_can(core, bytes.fromhex("000b0300050000400103000000"))
+                    self.assertEqual(LIB.test_loco_velocity(core, 0), 0)
+                    self.assertEqual(LIB.test_loco_direction(core, 0), 1)
+                finally:
+                    LIB.test_loco_destroy(core)
+
+    def test_duplicate_names_and_independent_core_lifetimes(self):
+        with open(os.path.join(self.dir, "lokomotive.cs2"), "a") as fp:
+            fp.write("lokomotive\n .name=Zug B\n .uid=0x4003\n")
+        first = LIB.test_loco_create(os.fsencode(self.dir), 1)
+        self.assertTrue(first)
+        try:
+            second = LIB.test_loco_create(os.fsencode(self.dir), 1)
+            self.assertTrue(second)
+            try:
+                self.assertEqual(LIB.test_loco_count(first), 3)
+                self.assertEqual([LIB.test_loco_name(first, i) for i in range(3)],
+                                 [b"Zug B", b"Zug A", b"Zug B"])
+                LIB.test_loco_handle_can(first, bytes.fromhex("00090300060000400303200000"))
+                self.assertEqual(LIB.test_loco_velocity(first, 0), 0)
+                self.assertEqual(LIB.test_loco_velocity(first, 2), 800)
+            finally:
+                LIB.test_loco_destroy(second)
+            self.assertEqual(LIB.test_loco_name(first, 2), b"Zug B")
+        finally:
+            LIB.test_loco_destroy(first)
+
+    def test_missing_loco_name_fails_initialization(self):
+        with open(os.path.join(self.dir, "lokomotive.cs2"), "w") as fp:
+            fp.write("[lokomotive]\nlokomotive\n .uid=0x4001\n")
+        with quiet_stderr():
+            self.assertFalse(LIB.test_loco_create(os.fsencode(self.dir), 1))
 
 
 def tearDownModule():
@@ -1552,6 +1636,91 @@ class TestNativeBroadcastGateway(unittest.TestCase):
                 with open(path, "rb") as fp:
                     self.assertEqual(fp.read(), content)
         self.assertIsNone(gw.udp_recv(0.2))
+
+
+class TestNativeLocoNames(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="can2lan-loknamen-")
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        shutil.copytree(CONFIG_DIR, self.dir, dirs_exist_ok=True)
+
+    def start_gateway(self, names, slave=False):
+        with open(os.path.join(self.dir, "lokomotive.cs2"), "w") as fp:
+            fp.write("[lokomotive]\n")
+            for i, name in enumerate(names):
+                fp.write("lokomotive\n .name=%s\n .uid=0x%x\n" % (name, 0x4000 + i))
+        self.gw = Gateway(self, args=("-S",) if slave else (), config_dir=self.dir)
+        if not slave:
+            self.assertEqual(self.gw.bus_recv(), frame_to_can(M_GLEISBOX_ALL_PROTO_ENABLE))
+        self.clients = [self.gw.connect(), self.gw.connect()]
+
+    def send_can_request(self, canid, data):
+        self.gw.bus_send(canid, data)
+        request = canid.to_bytes(4, "big") + b"\x08" + data
+        ack = bytearray(request)
+        ack[1] |= 1
+        self.assertEqual(self.gw.bus_recv(), frame_to_can(bytes(ack)))
+        self.assertEqual(self.gw.udp_recv(), bytes(ack))
+        self.assertEqual(self.gw.udp_recv(), request)
+        for client in self.clients:
+            self.assertEqual(recv_exact(client, 26), bytes(ack) + request)
+
+    def check_range(self, names, first, count):
+        canid = 0x00404711
+        self.send_can_request(canid, b"loknamen")
+        self.send_can_request(canid, ("%d %d" % (first, count)).encode().ljust(8, b"\0"))
+        content = b"[lokomotive]\n"
+        for index in range(first, min(first + count, len(names))):
+            content += ("lok\n .nr=%d\n .name=%s\n" % (index, names[index])).encode()
+        content += ("numloks\n .wert=%d\n" % len(names)).encode()
+        padded = content.ljust((len(content) + 7) // 8 * 8, b"\0")
+        header = (bytes.fromhex("0042471106") + len(content).to_bytes(4, "big")
+                  + crc_ccitt(padded).to_bytes(2, "big") + b"\0\0")
+        frames = [header] + [bytes.fromhex("0042471108") + padded[i:i + 8]
+                             for i in range(0, len(padded), 8)]
+        self.assertEqual([self.gw.bus_recv(5) for _ in frames], [frame_to_can(f) for f in frames])
+        self.assertEqual([self.gw.udp_recv() for _ in frames], frames)
+        for client in self.clients:
+            self.assertEqual(split_frames(recv_exact(client, len(frames) * 13, timeout=10)), frames)
+
+    def test_requested_ranges_keep_file_order_and_total(self):
+        names = ["Zug B", "Zug A", "Zug B"]
+        self.start_gateway(names)
+        self.check_range(names, 0, 2)
+        self.check_range(names, 2, 5)
+        self.check_range(names, 8, 2)
+
+    def test_large_range_exceeds_can_queue_without_losing_frames(self):
+        names = ["Lok %03d lange Bezeichnung" % i for i in range(100)]
+        self.start_gateway(names)
+        self.check_range(names, 0, 100)
+
+    def test_slave_answers_can_name_requests(self):
+        names = ["Zug A", "Zug B"]
+        self.start_gateway(names, slave=True)
+        self.check_range(names, 0, 2)
+
+    def test_followup_from_another_hash_is_not_used(self):
+        self.start_gateway(["Zug A", "Zug B"])
+        self.send_can_request(0x00404711, b"loknamen")
+        other = bytes.fromhex("0040634a08") + b"0 2\0\0\0\0\0"
+        self.gw.bus_send(0x0040634A, b"0 2\0\0\0\0\0")
+        self.assertEqual(self.gw.udp_recv(), other)
+        for client in self.clients:
+            self.assertEqual(recv_exact(client, 13), other)
+        self.assertIsNone(self.gw.bus_recv(0.2))
+        self.assertIsNone(self.gw.udp_recv(0.2))
+
+    def test_invalid_followup_is_not_acknowledged(self):
+        self.start_gateway(["Zug A"])
+        self.send_can_request(0x00404711, b"loknamen")
+        invalid = bytes.fromhex("0040471108") + b"0 x\0\0\0\0\0"
+        self.gw.bus_send(0x00404711, invalid[5:])
+        self.assertEqual(self.gw.udp_recv(), invalid)
+        for client in self.clients:
+            self.assertEqual(recv_exact(client, 13), invalid)
+        self.assertIsNone(self.gw.bus_recv(0.2))
+        self.assertIsNone(self.gw.udp_recv(0.2))
 
 
 class TestNativeGatewaySlave(unittest.TestCase):

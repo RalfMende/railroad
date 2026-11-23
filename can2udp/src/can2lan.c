@@ -141,6 +141,11 @@ static int gw_can_enqueue(void *arg, unsigned char *frame) {
     return can_tx_enqueue(frame);
 }
 
+static int gw_can_free(void *arg) {
+    (void)arg;
+    return can_tx_free();
+}
+
 static int gw_tcp_clients(void *arg, int **clients) {
     struct gw_io_ctx *io = (struct gw_io_ctx *)arg;
     *clients = io->tcp_clients;
@@ -228,6 +233,7 @@ int main(int argc, char **argv) {
     core_io.tcp_send_all = gw_tcp_send_all;
     core_io.can_send = gw_can_send;
     core_io.can_enqueue = gw_can_enqueue;
+    core_io.can_free = gw_can_free;
     core_io.tcp_clients = gw_tcp_clients;
 
     memset(ifr.ifr_name, 0, sizeof(ifr.ifr_name));
@@ -560,6 +566,7 @@ int main(int argc, char **argv) {
 	}
 
 	/* write the next CAN frame if its pacing time has elapsed, otherwise wake up in time */
+	cs2_core_service(&core);
 	can_wait = can_tx_service(sc);
 	if ((can_wait >= 0) && (can_wait < 1000000)) {
 	    ts.tv_sec = 0;

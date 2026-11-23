@@ -38,6 +38,8 @@ struct cs2_core_io {
     int (*can_send)(void *arg, unsigned char *frame);
     /* queue a 13-byte CAN frame for the CAN bus (non-blocking, paced by the gateway's main loop) */
     int (*can_enqueue)(void *arg, unsigned char *frame);
+    /* number of free slots in the CAN send queue */
+    int (*can_free)(void *arg);
     /* provide connected primary TCP client descriptors */
     int (*tcp_clients)(void *arg, int **clients);
 };
@@ -49,10 +51,18 @@ enum cs2_core_source {
     CS2_SRC_CAN		/* frame from the CAN bus */
 };
 
+struct cs2_core_loco;
+struct cs2_loknamen_request;
+struct cs2_loknamen_stream;
+
 struct cs2_core_t {
     struct cs2_config_data_t cfg;	/* config clone/stream state */
     struct cs2_core_io io;
     char *config_dir;
+    struct cs2_core_loco *locos;
+    size_t loco_count;
+    struct cs2_loknamen_request *loknamen_requests;
+    struct cs2_loknamen_stream *loknamen_streams;
     int slave;				/* -S: slave mode - answer CAN member pings, don't send them */
     int ms1_workaround;			/* -m: fake cyclic MS1 slave monitoring response */
     int event_fd;			/* core event descriptor, -1 if none */
@@ -61,10 +71,13 @@ struct cs2_core_t {
 /* initialize the core context and local CS2 config data; call after parsing options and preparing gateway I/O.
    config_dir is normalized in place. The context must be zero-initialized by the caller. In master mode the
    60113 start sequence is sent first and the periodic CAN member ping timer is armed. Returns -1 on path or
-   start-frame or timer errors. */
+   config-read, start-frame or timer errors. */
 int cs2_core_init(struct cs2_core_t *core, const struct cs2_core_io *io, char *config_dir);
-/* dispatch a ready core event descriptor and release core event resources */
+/* dispatch a ready core event descriptor */
 int cs2_core_handle_event(struct cs2_core_t *core);
+/* enqueue pending CAN stream frames when queue space is available */
+void cs2_core_service(struct cs2_core_t *core);
+/* release core state and event resources */
 void cs2_core_close(struct cs2_core_t *core);
 int cs2_core_send_start_frames(struct cs2_core_t *core);
 int cs2_core_send_ping(struct cs2_core_t *core);

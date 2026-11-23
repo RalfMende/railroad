@@ -876,8 +876,10 @@ void read_track_pages(char *dir) {
     }
 }
 
-int read_loco_data(char *config_file, int config_type) {
+int read_loco_data_with_callback(char *config_file, int config_type,
+				 int (*callback)(const struct loco_data_t *, void *), void *arg) {
     int l0_token_n, l1_token_n, l2_token_n, loco_complete;
+    int result = EXIT_SUCCESS;
     FILE *fp = NULL;
     char line[MAXSIZE];
     char *name = NULL, *type = NULL, *icon = NULL, *sret = NULL;
@@ -901,7 +903,8 @@ int read_loco_data(char *config_file, int config_type) {
     loco = calloc(1, sizeof(struct loco_data_t));
     if (loco == NULL) {
 	fprintf(stderr, "can't calloc buffer for loco data: %s\n", strerror(errno));
-	fclose(fp);
+	if (fp)
+	    fclose(fp);
 	return (EXIT_FAILURE);
     }
 
@@ -909,7 +912,8 @@ int read_loco_data(char *config_file, int config_type) {
     if (loco->mfxAdr == NULL) {
 	fprintf(stderr, "can't calloc buffer for loco mfx data: %s\n", strerror(errno));
 	free(loco);
-	fclose(fp);
+	if (fp)
+	    fclose(fp);
 	return (EXIT_FAILURE);
     }
     mfx = loco->mfxAdr;
@@ -940,13 +944,22 @@ int read_loco_data(char *config_file, int config_type) {
 	    case L0_LOCO:
 		/* TODO: next loco */
 		if (loco_complete) {
-		    add_loco(loco);
+		    if (callback && (!loco->name || callback(loco, arg) != 0)) {
+			fprintf(stderr, "%s: can't store locomotive data\n", __func__);
+			result = EXIT_FAILURE;
+			goto cleanup;
+		    }
+		    if (add_loco(loco) != 0 && callback) {
+			result = EXIT_FAILURE;
+			goto cleanup;
+		    }
 		    memset(loco->mfxAdr, 0, sizeof(struct mfxAdr_t));
 		    memset(loco, 0, sizeof(struct loco_data_t));
 		    loco->mfxAdr = mfx;
 		    check_free(name);
 		    check_free(type);
 		    check_free(icon);
+		    name = type = icon = NULL;
 		} else {
 		    loco_complete = 1;
 		}
@@ -1004,25 +1017,46 @@ int read_loco_data(char *config_file, int config_type) {
 		debug_print("match uid:       >0x%04x<\n", loco->uid);
 		break;
 	    case L1_NAME:
-		if (asprintf(&name, "%s", &line[L1_NAME_LENGTH]) < 0)
-		    fprintf(stderr, "can't alloc memory for loco->name: %s\n", __func__);
+		free(name);
+		name = strdup(&line[L1_NAME_LENGTH]);
+		if (!name) {
+		    fprintf(stderr, "can't alloc memory for loco->name: %s\n", strerror(errno));
+		    result = EXIT_FAILURE;
+		    goto cleanup;
+		}
 		function = -1;
 		loco->name = name;
 		/* we assume that the icon does have the same name
 		   it will be overwritten by the token .icon anyway */
-		loco->icon = strdup(name);
+		free(icon);
+		icon = strdup(name);
+		if (!icon) {
+		    fprintf(stderr, "can't alloc memory for loco->icon: %s\n", strerror(errno));
+		    result = EXIT_FAILURE;
+		    goto cleanup;
+		}
+		loco->icon = icon;
 		debug_print("match name:      >%s<\n", loco->name);
 		break;
 	    case L1_TYPE:
-		if (asprintf(&type, "%s", &line[L1_TYPE_LENGTH]) < 0)
-		    fprintf(stderr, "can't alloc memory for loco->type: %s\n", __func__);
+		free(type);
+		type = strdup(&line[L1_TYPE_LENGTH]);
+		if (!type) {
+		    fprintf(stderr, "can't alloc memory for loco->type: %s\n", strerror(errno));
+		    result = EXIT_FAILURE;
+		    goto cleanup;
+		}
 		loco->type = type;
 		debug_print("match type:      >%s<\n", loco->type);
 		break;
 	    case L1_ICON:
-		free(loco->icon);
-		if (asprintf(&icon, "%s", &line[L1_ICON_LENGTH]) < 0)
-		    fprintf(stderr, "can't alloc memory for loco->icon: %s\n", __func__);
+		free(icon);
+		icon = strdup(&line[L1_ICON_LENGTH]);
+		if (!icon) {
+		    fprintf(stderr, "can't alloc memory for loco->icon: %s\n", strerror(errno));
+		    result = EXIT_FAILURE;
+		    goto cleanup;
+		}
 		loco->icon = icon;
 		debug_print("match icon:      >%s<\n", loco->icon);
 		break;
@@ -1237,8 +1271,19 @@ int read_loco_data(char *config_file, int config_type) {
 	    config_file = sret;
 	}
     }
-    if (loco->name)
-	add_loco(loco);
+    if (fp && ferror(fp)) {
+	fprintf(stderr, "%s: can't read locomotive data: %s\n", __func__, strerror(errno));
+	result = EXIT_FAILURE;
+	goto cleanup;
+    }
+    if (loco_complete && callback && (!loco->name || callback(loco, arg) != 0)) {
+	fprintf(stderr, "%s: can't store locomotive data\n", __func__);
+	result = EXIT_FAILURE;
+	goto cleanup;
+    }
+    if (loco->name && add_loco(loco) != 0 && callback)
+	result = EXIT_FAILURE;
+cleanup:
     if (name)
 	free(name);
     if (type)
@@ -1251,7 +1296,11 @@ int read_loco_data(char *config_file, int config_type) {
 	fclose(fp);
 
     /* printf("loco data count: %u\n", HASH_COUNT(loco_data)); */
-    return (EXIT_SUCCESS);
+    return result;
+}
+
+int read_loco_data(char *config_file, int config_type) {
+    return read_loco_data_with_callback(config_file, config_type, NULL, NULL);
 }
 
 int read_loco_names(char *config_file) {

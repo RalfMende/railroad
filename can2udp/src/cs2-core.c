@@ -83,6 +83,94 @@ char *ms2_configs[] = {
 /* track pages of the local gleisbild.cs2, owned by the gateway */
 extern char **page_name;
 
+struct cs2_core_loco {
+    char *name;
+    uint32_t uid;
+    unsigned int velocity;
+    unsigned int direction;
+};
+
+struct cs2_loknamen_request {
+    uint16_t hash;
+    struct cs2_loknamen_request *next;
+};
+
+struct cs2_loknamen_stream {
+    unsigned char *data;
+    size_t length;
+    size_t offset;
+    uint32_t canid;
+    uint16_t crc;
+    int header_sent;
+    struct cs2_loknamen_stream *next;
+};
+
+static int cs2_core_add_loco(const struct loco_data_t *config, void *arg) {
+    struct cs2_core_t *core = arg;
+    struct cs2_core_loco *locos, *loco;
+    char *name = strdup(config->name);
+
+    if (!name) {
+	fprint_syslog_wc(stderr, LOG_ERR, "can't allocate locomotive name:", strerror(errno));
+	return -1;
+    }
+    if (core->loco_count == SIZE_MAX / sizeof(*core->locos)) {
+	free(name);
+	fprint_syslog(stderr, LOG_ERR, "too many locomotives");
+	return -1;
+    }
+    locos = realloc(core->locos, (core->loco_count + 1) * sizeof(*core->locos));
+    if (!locos) {
+	free(name);
+	fprint_syslog_wc(stderr, LOG_ERR, "can't allocate locomotive state:", strerror(errno));
+	return -1;
+    }
+    core->locos = locos;
+    loco = &core->locos[core->loco_count++];
+    loco->name = name;
+    loco->uid = config->uid;
+    loco->velocity = 0;
+    loco->direction = 1;
+    return 0;
+}
+
+static int cs2_core_load_locos(struct cs2_core_t *core, char *filename) {
+    delete_all_loco_data();
+    if (read_loco_data_with_callback(filename, CONFIG_FILE, cs2_core_add_loco, core) != 0) {
+	syslog(LOG_ERR, "%s: can't read locomotive data from %s\n", __func__, filename);
+	delete_all_loco_data();
+	return -1;
+    }
+    return 0;
+}
+
+static void cs2_core_update_loco(struct cs2_core_t *core, uint32_t canid, unsigned char *frame) {
+    uint32_t uid;
+    unsigned int command = (canid >> 17) & 0xFF;
+    size_t i;
+
+    if (!(canid & 0x10000) || !((command == 0x04 && frame[4] == 6) ||
+				 (command == 0x05 && frame[4] == 5)))
+	return;
+    memcpy(&uid, &frame[5], sizeof(uid));
+    uid = ntohl(uid);
+    for (i = 0; i < core->loco_count; i++) {
+	struct cs2_core_loco *loco = &core->locos[i];
+	if (loco->uid != uid)
+	    continue;
+	if (command == 0x04) {
+	    unsigned int velocity = ((unsigned int)frame[9] << 8) | frame[10];
+	    if (velocity <= 1023)
+		loco->velocity = velocity;
+	} else if (frame[9] >= 1 && frame[9] <= 3) {
+	    unsigned int direction = frame[9] == 3 ? 3 - loco->direction : frame[9];
+	    if (loco->direction != direction)
+		loco->velocity = 0;
+	    loco->direction = direction;
+	}
+    }
+}
+
 typedef int (*cs2_config_send_fn)(void *arg, int destination, unsigned char *data, int length);
 
 #define CHUNK 0x8000
@@ -687,8 +775,6 @@ int cs2_core_init(struct cs2_core_t *core, const struct cs2_core_io *io, char *c
     core->event_fd = -1;
     core->cfg.state = CS2_STATE_INACTIVE;
     core->cfg.track_index = MAX_TRACK_PAGE;
-    if (core->slave)
-	return 0;
     if (!config_dir)
 	return -1;
     if (!config_dir[0])
@@ -712,27 +798,36 @@ int cs2_core_init(struct cs2_core_t *core, const struct cs2_core_io *io, char *c
 	fprint_syslog(stderr, LOG_ERR, "config file path is too long");
 	return -1;
     }
+    if (cs2_core_load_locos(core, loco_file) < 0) {
+	cs2_core_close(core);
+	return -1;
+    }
+    if (core->slave)
+	return 0;
     if (!page_name) {
 	page_name = calloc(MAX_TRACK_PAGE, sizeof(char *));
 	if (!page_name) {
 	    fprint_syslog_wc(stderr, LOG_ERR, "can't allocate track page names:", strerror(errno));
+	    cs2_core_close(core);
 	    return -1;
 	}
     }
     core->cfg.page_name = calloc(MAX_TRACK_PAGE, sizeof(char *));
     if (!core->cfg.page_name) {
 	fprint_syslog_wc(stderr, LOG_ERR, "can't allocate cloned track page names:", strerror(errno));
+	cs2_core_close(core);
 	return -1;
     }
     core->cfg.dir = config_dir;
     page_name = cs2_config_read_track_file(track_file, page_name);
-    if (read_loco_data(loco_file, CONFIG_FILE) != 0)
-	syslog(LOG_WARNING, "%s: can't read loco data from %s\n", __func__, loco_file);
-    if (cs2_core_send_start_frames(core) < 0)
+    if (cs2_core_send_start_frames(core) < 0) {
+	cs2_core_close(core);
 	return -1;
+    }
     core->event_fd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC | TFD_NONBLOCK);
     if (core->event_fd < 0) {
 	fprint_syslog_wc(stderr, LOG_ERR, "can't create core timer:", strerror(errno));
+	cs2_core_close(core);
 	return -1;
     }
     if (core->event_fd >= FD_SETSIZE) {
@@ -769,6 +864,23 @@ int cs2_core_handle_event(struct cs2_core_t *core) {
 }
 
 void cs2_core_close(struct cs2_core_t *core) {
+    size_t i;
+    while (core->loknamen_requests) {
+	struct cs2_loknamen_request *request = core->loknamen_requests;
+	core->loknamen_requests = request->next;
+	free(request);
+    }
+    while (core->loknamen_streams) {
+	struct cs2_loknamen_stream *stream = core->loknamen_streams;
+	core->loknamen_streams = stream->next;
+	free(stream->data);
+	free(stream);
+    }
+    for (i = 0; i < core->loco_count; i++)
+	free(core->locos[i].name);
+    free(core->locos);
+    core->locos = NULL;
+    core->loco_count = 0;
     if (core->event_fd >= 0) {
 	if (close(core->event_fd) < 0)
 	    fprint_syslog_wc(stderr, LOG_ERR, "can't close core timer:", strerror(errno));
@@ -976,6 +1088,182 @@ static void cs2_core_send_config(struct cs2_core_t *core, int tcp_socket,
 	syslog(LOG_ERR, "%s: failed to send TCP config stream for %s\n", __func__, name);
 }
 
+static int cs2_core_send_can_response(struct cs2_core_t *core, unsigned char *frame) {
+    int can_result = core->io.can_enqueue(core->io.arg, frame);
+    if (can_result < 0)
+	syslog(LOG_ERR, "%s: can't queue CAN response\n", __func__);
+    if (core->io.udp_send(core->io.arg, frame, CAN_ENCAP_SIZE) < 0)
+	syslog(LOG_ERR, "%s: can't send UDP response\n", __func__);
+    if (core->io.tcp_send_all(core->io.arg, frame, CAN_ENCAP_SIZE) < 0)
+	syslog(LOG_ERR, "%s: can't send TCP response\n", __func__);
+    return can_result;
+}
+
+static int cs2_core_parse_loknamen_range(const unsigned char *data, size_t *first, size_t *count) {
+    char text[9], *end;
+    unsigned long value;
+    size_t i;
+
+    memcpy(text, data, 8);
+    text[8] = '\0';
+    for (i = 0; i < 8 && text[i]; i++)
+	;
+    for (; i < 8; i++)
+	if (text[i] != '\0' && text[i] != ' ')
+	    return -1;
+    if (!isdigit((unsigned char)text[0]))
+	return -1;
+    errno = 0;
+    value = strtoul(text, &end, 10);
+    if (errno || *end != ' ')
+	return -1;
+    *first = value;
+    while (*end == ' ')
+	end++;
+    if (!isdigit((unsigned char)*end))
+	return -1;
+    errno = 0;
+    value = strtoul(end, &end, 10);
+    if (errno)
+	return -1;
+    *count = value;
+    while (*end == ' ')
+	end++;
+    return *end == '\0' ? 0 : -1;
+}
+
+static struct cs2_loknamen_stream *cs2_core_make_loknamen_stream(
+	struct cs2_core_t *core, uint32_t canid, size_t first, size_t count) {
+    struct cs2_loknamen_stream *stream;
+    unsigned char *padded;
+    char *data = NULL;
+    size_t length = 0, padded_length, i;
+    int failed = 0;
+    FILE *output = open_memstream(&data, &length);
+
+    if (!output) {
+	fprint_syslog_wc(stderr, LOG_ERR, "can't create locomotive name stream:", strerror(errno));
+	return NULL;
+    }
+    if (fprintf(output, "[lokomotive]\n") < 0)
+	failed = 1;
+    for (i = 0; i < core->loco_count; i++) {
+	if (i >= first && i - first < count &&
+	    fprintf(output, "lok\n .nr=%zu\n .name=%s\n", i, core->locos[i].name) < 0)
+	    failed = 1;
+    }
+    if (fprintf(output, "numloks\n .wert=%zu\n", core->loco_count) < 0)
+	failed = 1;
+    if (fclose(output) != 0)
+	failed = 1;
+    if (failed || length > UINT32_MAX - 7 || length > SIZE_MAX - 7) {
+	syslog(LOG_ERR, "%s: can't build locomotive name stream\n", __func__);
+	free(data);
+	return NULL;
+    }
+    padded_length = (length + 7) & ~(size_t)7;
+    padded = realloc(data, padded_length);
+    if (!padded) {
+	fprint_syslog_wc(stderr, LOG_ERR, "can't allocate locomotive name stream:", strerror(errno));
+	free(data);
+	return NULL;
+    }
+    memset(padded + length, 0, padded_length - length);
+    stream = calloc(1, sizeof(*stream));
+    if (!stream) {
+	fprint_syslog_wc(stderr, LOG_ERR, "can't allocate locomotive stream state:", strerror(errno));
+	free(padded);
+	return NULL;
+    }
+    stream->data = padded;
+    stream->length = length;
+    stream->canid = (canid & 0xFFFEFFFFUL) | 0x00020000UL;
+    stream->crc = CRCCCITT(padded, padded_length, 0xFFFF);
+    return stream;
+}
+
+static void cs2_core_handle_loknamen(struct cs2_core_t *core, uint32_t canid, unsigned char *frame) {
+    struct cs2_loknamen_request **slot = &core->loknamen_requests;
+    struct cs2_loknamen_request *request;
+    struct cs2_loknamen_stream *stream, **tail;
+    unsigned char reply[CAN_ENCAP_SIZE];
+    size_t first, count;
+    uint16_t hash = canid & 0xFFFF;
+
+    while (*slot && (*slot)->hash != hash)
+	slot = &(*slot)->next;
+    if (memcmp(&frame[5], "loknamen", 8) == 0) {
+	if (!*slot) {
+	    request = calloc(1, sizeof(*request));
+	    if (!request) {
+		fprint_syslog_wc(stderr, LOG_ERR, "can't allocate locomotive request:", strerror(errno));
+		return;
+	    }
+	    request->hash = hash;
+	    *slot = request;
+	}
+	memcpy(reply, frame, CAN_ENCAP_SIZE);
+	reply[1] |= 1;
+	if (cs2_core_send_can_response(core, reply) < 0) {
+	    request = *slot;
+	    *slot = request->next;
+	    free(request);
+	}
+	return;
+    }
+    if (!*slot || !isdigit(frame[5]))
+	return;
+    request = *slot;
+    *slot = request->next;
+    free(request);
+    if (cs2_core_parse_loknamen_range(&frame[5], &first, &count) < 0) {
+	syslog(LOG_WARNING, "%s: invalid locomotive name range\n", __func__);
+	return;
+    }
+    stream = cs2_core_make_loknamen_stream(core, canid, first, count);
+    if (!stream)
+	return;
+    memcpy(reply, frame, CAN_ENCAP_SIZE);
+    reply[1] |= 1;
+    if (cs2_core_send_can_response(core, reply) < 0) {
+	free(stream->data);
+	free(stream);
+	return;
+    }
+    tail = &core->loknamen_streams;
+    while (*tail)
+	tail = &(*tail)->next;
+    *tail = stream;
+}
+
+void cs2_core_service(struct cs2_core_t *core) {
+    while (core->loknamen_streams && core->io.can_free(core->io.arg) > 0) {
+	struct cs2_loknamen_stream *stream = core->loknamen_streams;
+	unsigned char frame[CAN_ENCAP_SIZE] = { 0 };
+	uint32_t value = htonl(stream->canid);
+	size_t padded_length = (stream->length + 7) & ~(size_t)7;
+
+	memcpy(frame, &value, 4);
+	if (!stream->header_sent) {
+	    uint16_t crc = htons(stream->crc);
+	    value = htonl((uint32_t)stream->length);
+	    frame[4] = 6;
+	    memcpy(&frame[5], &value, 4);
+	    memcpy(&frame[9], &crc, 2);
+	    stream->header_sent = 1;
+	} else {
+	    frame[4] = 8;
+	    memcpy(&frame[5], stream->data + stream->offset, 8);
+	    stream->offset += 8;
+	}
+	if (cs2_core_send_can_response(core, frame) < 0 || stream->offset >= padded_length) {
+	    core->loknamen_streams = stream->next;
+	    free(stream->data);
+	    free(stream);
+	}
+    }
+}
+
 /*
  * Logical processing of a received 13-byte frame, regardless of whether it
  * arrived via UDP, TCP or the CAN bus: answer CAN member pings (in slave
@@ -1002,6 +1290,10 @@ void cs2_core_handle_frame(struct cs2_core_t *core, enum cs2_core_source src, in
     /* frames from the CAN bus: a config change broadcast from a CAN member
        triggers a config data stream to all TCP clients */
     if (src == CS2_SRC_CAN) {
+	cs2_core_update_loco(core, canid, netframe);
+	if ((canid & 0x01FF0000UL) == 0x00400000UL && netframe[4] == 8) {
+	    cs2_core_handle_loknamen(core, canid, netframe);
+	}
 	if (((canid & 0x1FFFF00UL) == 0x0434700UL) && (netframe[4] == 8)) {
 	    uint8_t fill = canid & 0xFF;
 	    int *clients;

@@ -57,6 +57,8 @@ int read_track_data(char *config_file);
 int read_track_config(char *config_file);
 void read_track_pages(char *dir);
 int read_loco_data(char *config_file, int config_type);
+int read_loco_data_with_callback(char *config_file, int config_type,
+				 int (*callback)(const struct loco_data_t *, void *), void *arg);
 int read_loco_names(char *config_file);
 int show_loco_list(FILE *file, int maxnmbr);
 void show_loco_names(FILE *file, int low, int nmbr);
